@@ -41,6 +41,7 @@ MarketPlaceLens is an app by Alex Rosbach. Legal notice and project contact info
 | Kleinanzeigen | Stable | Main supported connector for public search/category URLs |
 | Facebook Marketplace | **In testing** | Often returns login, consent, location, or JavaScript-only pages |
 | mobile.de | **In testing** | Public HTML support is limited; official API access is separate |
+| Marktplaats.nl | **In testing** | Reads public Marktplaats listing cards from search result pages |
 | Generic HTML | Experimental | Basic parser for simple result pages |
 
 ## Screenshots

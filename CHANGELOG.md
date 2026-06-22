@@ -4,6 +4,7 @@ All notable changes to MarketPlaceLens are documented here.
 
 ## Unreleased
 
+- Added Marktplaats.nl as an in-testing marketplace source with URL validation, dedicated listing-card parsing, UI provider selection, AI quick-job support, documentation, and connector tests.
 - README and full documentation now explain the product advantage over native marketplace searches: granular search rules, a unified review workflow, and built-in AI assistance.
 - README now uses the LanLens-style Buy Me a Coffee button and explains that voluntary support does not buy support priority, features, or access.
 - README screenshots now use consistent laptop and docking-station demo listings instead of mismatched product images.

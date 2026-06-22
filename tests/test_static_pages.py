@@ -47,6 +47,15 @@ class StaticPageTests(unittest.TestCase):
         self.assertIn('"notebooks"', app_js)
         self.assertIn('"278"', app_js)
 
+    def test_index_exposes_marktplaats_source_option(self) -> None:
+        response = static_page_response("index.html")
+        html = response.body.decode("utf-8")
+        app_js = (Path(__file__).resolve().parents[1] / "app" / "static" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('value="marktplaats"', html)
+        self.assertIn('data-source-option="marktplaats"', html)
+        self.assertIn("https://www.marktplaats.nl/q/", app_js)
+
 
 if __name__ == "__main__":
     unittest.main()
