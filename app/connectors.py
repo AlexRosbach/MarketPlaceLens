@@ -53,6 +53,10 @@ class MarketplaceConnector:
             host = parsed.netloc.lower()
             if host not in {"mobile.de", "www.mobile.de", "suchen.mobile.de"}:
                 raise ValueError("mobile.de jobs need a mobile.de or suchen.mobile.de URL.")
+        if self.source_type == "marktplaats":
+            host = parsed.netloc.lower()
+            if host not in {"marktplaats.nl", "www.marktplaats.nl"}:
+                raise ValueError("Marktplaats jobs need a marktplaats.nl URL.")
 
     async def fetch_listings(self, profile: dict) -> list[ListingCandidate]:
         raise NotImplementedError
@@ -85,13 +89,15 @@ class HtmlListingConnector(MarketplaceConnector):
         self.validate_search_url(search_url)
         user_agent = (
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-            if self.source_type in {"facebook", "mobilede"}
+            if self.source_type in {"facebook", "mobilede", "marktplaats"}
             else settings.user_agent
         )
         request_headers = {
             "User-Agent": user_agent,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+            "Accept-Language": "nl-NL,nl;q=0.9,de-DE;q=0.8,de;q=0.7,en;q=0.6"
+            if self.source_type == "marktplaats"
+            else "de-DE,de;q=0.9,en;q=0.8",
         }
         if self.source_type == "facebook":
             request_headers.update(facebook_browser_headers())
@@ -129,6 +135,11 @@ class HtmlListingConnector(MarketplaceConnector):
                         "mobile.de blocked the anonymous server request. "
                         "Try a concrete public search result URL; if mobile.de still returns 403, the page cannot be watched from this server."
                     ) from exc
+                if self.source_type == "marktplaats" and exc.response.status_code in {401, 403}:
+                    raise ValueError(
+                        "Marktplaats.nl blocked the anonymous server request. "
+                        "Try a concrete public search result URL; if Marktplaats still returns 403, the page cannot be watched from this server."
+                    ) from exc
                 raise
             if self.source_type == "kleinanzeigen":
                 return await self.fetch_paginated_kleinanzeigen(
@@ -155,6 +166,14 @@ class HtmlListingConnector(MarketplaceConnector):
                 raise ValueError(
                     "mobile.de returned HTML without embedded public vehicle results. "
                     "Use a concrete mobile.de search result URL copied from the browser."
+                )
+            return listings
+        if self.source_type == "marktplaats":
+            listings = self.parse_marktplaats_listings(response.text, profile)
+            if not listings:
+                raise ValueError(
+                    "Marktplaats.nl returned HTML without public listing cards. "
+                    "Use a concrete Marktplaats search result URL copied from the browser."
                 )
             return listings
         return self.parse_listings(response.text, profile)
@@ -403,6 +422,88 @@ class HtmlListingConnector(MarketplaceConnector):
             content_hash=hashlib.sha256(hash_input.encode("utf-8")).hexdigest(),
         )
 
+    def parse_marktplaats_listings(self, html: str, profile: dict) -> list[ListingCandidate]:
+        soup = BeautifulSoup(html, "html.parser")
+        cards = [node for node in soup.select("li.hz-Listing, article.hz-Listing, .hz-Listing") if isinstance(node, Tag)]
+        if not cards:
+            cards = [
+                node
+                for node in soup.select("li, article")
+                if isinstance(node, Tag) and node.select_one("a[href^='/v/'], a[href*='marktplaats.nl/v/']")
+            ]
+        candidates: list[ListingCandidate] = []
+        seen: set[str] = set()
+        for card in cards[:200]:
+            candidate = self.normalize_marktplaats_listing(card, profile["search_url"])
+            if not candidate or candidate.content_hash in seen:
+                continue
+            seen.add(candidate.content_hash)
+            candidates.append(candidate)
+        return candidates
+
+    def normalize_marktplaats_listing(self, card: Tag, base_url: str) -> ListingCandidate | None:
+        anchor = card.select_one("a[href^='/v/'], a[href*='marktplaats.nl/v/']")
+        if not isinstance(anchor, Tag):
+            return None
+        listing_url = urljoin("https://www.marktplaats.nl", str(anchor.get("href") or ""))
+        if not is_marktplaats_listing_url(listing_url):
+            return None
+        title = clean_text(
+            first_text_by_class_pattern(card, [r"\bListingTitle_hz-Listing-title-new"])
+            or first_text(
+                card,
+                [
+                    "[class*=listing-title]",
+                    "[class*=title-new]",
+                    "h2",
+                    "h3",
+                    "a[title]",
+                    "a",
+                ],
+            )
+        )
+        if not title:
+            title = clean_text(str(anchor.get("title") or anchor.get("aria-label") or ""))
+        if not title or len(title) < 3:
+            return None
+        price_text = clean_text(
+            first_text_by_class_pattern(card, [r"\bListingPrice_hz-Listing-price"])
+            or first_text(card, ["[class*=price]", "[data-testid*=price]"])
+        )
+        location_text = clean_text(
+            first_text_by_class_pattern(card, [r"\bListingLocationDetails_hz-Listing-location-label"])
+            or first_text(card, ["[class*=location]", "[data-testid*=location]"])
+        )
+        posted_at_text = clean_text(
+            first_text_by_class_pattern(card, [r"\bListingDate_hz-Listing-date"])
+            or first_text(card, ["[class*=date]", "time"])
+        )
+        category_text = marktplaats_category_from_url(listing_url)
+        snippet = clean_text(
+            first_text_by_class_pattern(card, [r"\bListingDescription_hz-Listing-description"])
+            or first_text(card, ["[class*=Description]", "[class*=description]", "p"])
+        )
+        image = card.find("img")
+        thumbnail_url = ""
+        if isinstance(image, Tag):
+            thumbnail_url = urljoin(base_url, str(image.get("src") or image.get("data-src") or ""))
+        source_listing_id = extract_marktplaats_listing_id(listing_url)
+        hash_input = "|".join([source_listing_id, title, price_text, location_text])
+        return ListingCandidate(
+            source_type=self.source_type,
+            source_listing_id=source_listing_id,
+            title=title,
+            price_text=price_text,
+            price_value=parse_price(price_text),
+            location_text=location_text,
+            category_text=category_text,
+            posted_at_text=posted_at_text,
+            description_snippet=snippet[:400],
+            listing_url=listing_url,
+            thumbnail_url=thumbnail_url,
+            content_hash=hashlib.sha256(hash_input.encode("utf-8")).hexdigest(),
+        )
+
     def parse_listings(self, html: str, profile: dict) -> list[ListingCandidate]:
         soup = BeautifulSoup(html, "html.parser")
         selectors = [
@@ -552,6 +653,21 @@ def parse_listing_availability(source_type: str, status_code: int, html: str, fi
             return "reserved"
         if "login" in final_url:
             return "unknown"
+    if source_type == "marktplaats":
+        if any(
+            phrase in text
+            for phrase in (
+                "advertentie is niet beschikbaar",
+                "advertentie bestaat niet meer",
+                "deze advertentie is verwijderd",
+                "deze advertentie is niet meer beschikbaar",
+            )
+        ):
+            return "deleted"
+        if any(phrase in text for phrase in ("gereserveerd", "verkocht", "reserved", "sold")):
+            return "reserved"
+        if "/v/" not in urlparse(final_url).path:
+            return "unknown"
     return "active"
 
 
@@ -563,9 +679,27 @@ def first_text(card: Tag, selectors: list[str]) -> str:
     return ""
 
 
+def first_text_by_class_pattern(card: Tag, patterns: list[str]) -> str:
+    compiled = [re.compile(pattern) for pattern in patterns]
+    for node in card.find_all(True):
+        if not isinstance(node, Tag):
+            continue
+        classes = " ".join(str(item) for item in (node.get("class") or []))
+        if classes and any(pattern.search(classes) for pattern in compiled):
+            text = clean_text(node.get_text(" ", strip=True))
+            if text:
+                return text
+    return ""
+
+
 def is_kleinanzeigen_listing_url(url: str) -> bool:
     parsed = urlparse(urljoin("https://www.kleinanzeigen.de", url))
     return "kleinanzeigen.de" in parsed.netloc.lower() and "/s-anzeige/" in parsed.path
+
+
+def is_marktplaats_listing_url(url: str) -> bool:
+    parsed = urlparse(urljoin("https://www.marktplaats.nl", url))
+    return parsed.netloc.lower() in {"marktplaats.nl", "www.marktplaats.nl"} and parsed.path.startswith("/v/")
 
 
 def is_non_listing_artifact(source_type: str, title: str, listing_url: str) -> bool:
@@ -593,6 +727,20 @@ def extract_listing_id(url: str) -> str:
     parsed = urlparse(url)
     tail = parsed.path.rstrip("/").split("/")[-1]
     return tail or hashlib.sha1(url.encode("utf-8")).hexdigest()
+
+
+def extract_marktplaats_listing_id(url: str) -> str:
+    parsed = urlparse(url)
+    match = re.search(r"/([am]\d{7,})(?:-|/|$)", parsed.path)
+    return match.group(1) if match else extract_listing_id(url)
+
+
+def marktplaats_category_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) < 2 or parts[0] != "v":
+        return ""
+    return clean_text(parts[1].replace("-", " "))
 
 
 def canonical_facebook_item_url(url: str) -> str:
@@ -794,6 +942,6 @@ def extract_mobilede_initial_state(html: str) -> dict:
 
 
 def get_connector(source_type: str) -> MarketplaceConnector:
-    if source_type in {"html", "kleinanzeigen", "facebook", "mobilede"}:
+    if source_type in {"html", "kleinanzeigen", "facebook", "mobilede", "marktplaats"}:
         return HtmlListingConnector(source_type)
     raise ValueError(f"Unsupported source type: {source_type}")

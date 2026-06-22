@@ -38,6 +38,12 @@ class AiDraftTests(unittest.TestCase):
         self.assertEqual(draft["source_type"], "kleinanzeigen")
         self.assertEqual(draft["max_listing_age_days"], 365)
 
+    def test_normalize_search_draft_accepts_marktplaats_source(self) -> None:
+        draft = normalize_search_draft('{"source_type":"marktplaats","query":"bakfiets marktplaats.nl"}')
+
+        self.assertEqual(draft["source_type"], "marktplaats")
+        self.assertEqual(draft["query"], "bakfiets")
+
     def test_normalize_search_draft_cleans_price_from_query_and_infers_notebooks(self) -> None:
         draft = normalize_search_draft(
             """

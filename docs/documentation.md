@@ -77,6 +77,7 @@ Review mode shows one listing at a time with image, price, location, source, AI 
 | Kleinanzeigen | Stable primary path | Best-supported connector. Supports public search/category URLs, price, age, keyword, location/radius, and listing type handling. |
 | Facebook Marketplace | **In testing** | Works only when Facebook returns listing links to the server. Facebook frequently returns login, consent, location, or JavaScript shell pages. Optional Cookie headers are stored locally and sent only to `facebook.com`. |
 | mobile.de | **In testing** | Reads public search pages when embedded vehicle result data is available. The official mobile.de Search API needs separate Basic Auth access. |
+| Marktplaats.nl | **In testing** | Reads public Marktplaats search result cards and maps title, price, location, date, category, image, and listing URL into the normal review/watchlist flow. |
 | Generic HTML | Experimental | Basic fallback for simple link-card result pages. It is not a universal parser. |
 
 MarketPlaceLens does not bypass login walls, CAPTCHA, bot protection, private APIs, blocked sessions, or platform access controls.
@@ -200,6 +201,10 @@ Facebook Marketplace is **in testing**. If the URL works only in your browser, a
 ### mobile.de fails
 
 mobile.de is **in testing**. Use a concrete public search result URL. If mobile.de returns no embedded result data or blocks the request, MarketPlaceLens records a connector error.
+
+### Marktplaats.nl fails
+
+Marktplaats.nl is **in testing**. Use a concrete public search result URL such as `https://www.marktplaats.nl/q/fiets/`. If Marktplaats returns no public listing cards or blocks the request, MarketPlaceLens records a connector error.
 
 ### AI request fails
 

@@ -21,6 +21,10 @@ Cookies can expire or be revoked. MarketPlaceLens stores the Cookie header local
 
 mobile.de is **in testing**. Use a concrete public search result URL. If mobile.de does not expose embedded vehicle result data to the server, the job records a connector error.
 
+## Marktplaats.nl Fails
+
+Marktplaats.nl is **in testing**. Use a concrete public search result URL such as `https://www.marktplaats.nl/q/fiets/`. If Marktplaats does not expose public listing cards to the server or blocks the request, the job records a connector error.
+
 ## AI Fails
 
 Use **Test AI** in Settings. For Ollama or LM Studio, the first request may take longer while a local model loads.

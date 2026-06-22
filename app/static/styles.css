@@ -675,6 +675,11 @@ h1 {
   color: #8a5a00;
 }
 
+.source-badge.marktplaats {
+  background: #e0f2fe;
+  color: #075985;
+}
+
 .meta {
   color: var(--muted);
   font-size: 0.9rem;

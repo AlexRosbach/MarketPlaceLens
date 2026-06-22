@@ -6,6 +6,7 @@ import unittest
 from app.connectors import (
     HtmlListingConnector,
     apply_kleinanzeigen_location_to_url,
+    extract_marktplaats_listing_id,
     facebook_cookie_has_login_session,
     facebook_browser_headers,
     facebook_requires_login,
@@ -96,6 +97,60 @@ class ConnectorTests(unittest.TestCase):
         self.assertEqual(listings[0].title, "Vintage Stuhl")
         self.assertEqual(listings[0].price_text, "120 €")
         self.assertEqual(listings[0].location_text, "10115 Berlin")
+
+    def test_marktplaats_search_url_validation_accepts_marktplaats_only(self) -> None:
+        connector = HtmlListingConnector("marktplaats")
+
+        connector.validate_search_url("https://www.marktplaats.nl/q/fiets/")
+        with self.assertRaises(ValueError):
+            connector.validate_search_url("https://www.example.test/q/fiets/")
+
+    def test_marktplaats_parser_reads_listing_cards(self) -> None:
+        html = """
+        <ul>
+          <li class="hz-Listing hz-Listing--list-item">
+            <a href="/v/fietsen-en-brommers/fietsen/a1511355607-bakfiets">
+              <img src="https://images.example.test/bakfiets.jpg" alt="Bakfiets">
+            </a>
+            <span class="ListingTitle_hz-Listing-title-new__YIv8B">Bakfiets Urban Arrow</span>
+            <h5 class="ListingPrice_hz-Listing-price__tlzf6">€ 1.250,00</h5>
+            <span class="ListingLocationDetails_hz-Listing-location-label__GfAXl">Amsterdam</span>
+            <span class="ListingDate_hz-Listing-date__cX8M_">Vandaag</span>
+            <p class="ListingDescription_hz-Listing-description__x">Goed onderhouden bakfiets.</p>
+          </li>
+        </ul>
+        """
+
+        listings = HtmlListingConnector("marktplaats").parse_marktplaats_listings(
+            html,
+            {"search_url": "https://www.marktplaats.nl/q/bakfiets/"},
+        )
+
+        self.assertEqual(len(listings), 1)
+        listing = listings[0]
+        self.assertEqual(listing.source_type, "marktplaats")
+        self.assertEqual(listing.source_listing_id, "a1511355607")
+        self.assertEqual(listing.title, "Bakfiets Urban Arrow")
+        self.assertEqual(listing.price_text, "€ 1.250,00")
+        self.assertEqual(listing.price_value, 1250.0)
+        self.assertEqual(listing.location_text, "Amsterdam")
+        self.assertEqual(listing.category_text, "fietsen en brommers")
+        self.assertEqual(listing.posted_at_text, "Vandaag")
+        self.assertEqual(listing.description_snippet, "Goed onderhouden bakfiets.")
+        self.assertEqual(
+            listing.listing_url,
+            "https://www.marktplaats.nl/v/fietsen-en-brommers/fietsen/a1511355607-bakfiets",
+        )
+
+    def test_marktplaats_listing_id_supports_m_and_a_ids(self) -> None:
+        self.assertEqual(
+            extract_marktplaats_listing_id("https://www.marktplaats.nl/v/audio-tv-en-foto/m1234567890-speakers"),
+            "m1234567890",
+        )
+        self.assertEqual(
+            extract_marktplaats_listing_id("https://www.marktplaats.nl/v/fietsen-en-brommers/a1511355607-fiets"),
+            "a1511355607",
+        )
 
     def test_search_url_validation_rejects_local_fetch_hosts(self) -> None:
         for host in ["localhost", "host.docker.internal", "127.0.0.1", "10.0.0.8", "192.168.1.10", "fd00::1"]:
@@ -213,6 +268,26 @@ class ConnectorTests(unittest.TestCase):
         self.assertEqual(
             parse_listing_availability("kleinanzeigen", 200, "<html>Normale Anzeige</html>", "https://www.kleinanzeigen.de/s-anzeige/a/1"),
             "active",
+        )
+
+    def test_marktplaats_availability_detects_reserved_and_deleted(self) -> None:
+        self.assertEqual(
+            parse_listing_availability(
+                "marktplaats",
+                200,
+                "<html>Deze advertentie is niet meer beschikbaar</html>",
+                "https://www.marktplaats.nl/v/fietsen-en-brommers/a1511355607-fiets",
+            ),
+            "deleted",
+        )
+        self.assertEqual(
+            parse_listing_availability(
+                "marktplaats",
+                200,
+                "<html>Gereserveerd</html>",
+                "https://www.marktplaats.nl/v/fietsen-en-brommers/a1511355607-fiets",
+            ),
+            "reserved",
         )
 
     def test_kleinanzeigen_parser_ignores_footer_links_when_no_listing_cards(self) -> None:

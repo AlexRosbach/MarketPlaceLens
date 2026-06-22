@@ -202,6 +202,7 @@ const translations = {
     "source.kleinanzeigenHelp": "Paste a public Kleinanzeigen search URL.",
     "source.facebookHelp": "Use a Marketplace search/category URL. The Facebook settings guide helps with browser sessions.",
     "source.mobiledeHelp": "Paste a public mobile.de search result URL.",
+    "source.marktplaatsHelp": "Paste a public Marktplaats.nl search result URL.",
     "source.generic": "Generic HTML",
     "source.genericHelp": "Use a simple listing result page.",
     "jobSummary.nameMissing": "Name missing",
@@ -561,6 +562,7 @@ const translations = {
     "source.kleinanzeigenHelp": "Öffentliche Kleinanzeigen-Such-URL einfügen.",
     "source.facebookHelp": "Marketplace-Suche oder Kategorie-URL einfügen. Die Facebook-Anleitung in den Einstellungen hilft bei Browser-Sessions.",
     "source.mobiledeHelp": "Öffentliche mobile.de-Suchergebnis-URL einfügen.",
+    "source.marktplaatsHelp": "Öffentliche Marktplaats.nl-Suchergebnis-URL einfügen.",
     "source.generic": "Generic HTML",
     "source.genericHelp": "Einfache Listing-Ergebnisseite verwenden.",
     "jobSummary.nameMissing": "Name fehlt",
@@ -811,6 +813,16 @@ const providerCategories = {
   mobilede: [
     { label: "Cars", path: "fahrzeuge/auto/search.html" },
     { label: "Used cars", path: "auto/gebrauchtwagen.html" },
+  ],
+  marktplaats: [
+    { label: "Cars", path: "autos" },
+    { label: "Bicycles", path: "fietsen-en-brommers/fietsen" },
+    { label: "Electronics", path: "elektronica" },
+    { label: "Home and interior", path: "huis-en-inrichting" },
+    { label: "Garden and terrace", path: "tuin-en-terras" },
+    { label: "Books", path: "boeken" },
+    { label: "Music and instruments", path: "muziek-en-instrumenten" },
+    { label: "Games and consoles", path: "spelcomputers-en-games" },
   ],
 };
 
@@ -1264,7 +1276,7 @@ async function loadProfiles() {
 }
 
 function groupedProfilesMarkup(profiles) {
-  const order = ["kleinanzeigen", "facebook", "mobilede", "html"];
+  const order = ["kleinanzeigen", "facebook", "mobilede", "marktplaats", "html"];
   return order.map((source) => {
     const items = profiles.filter((profile) => profile.source_type === source);
     return `
@@ -1290,6 +1302,7 @@ function sourceLabel(source) {
     kleinanzeigen: "Kleinanzeigen",
     facebook: "Facebook Marketplace (in testing)",
     mobilede: "mobile.de (in testing)",
+    marktplaats: "Marktplaats.nl (in testing)",
     html: "Generic HTML",
   }[source] || source;
 }
@@ -1303,6 +1316,7 @@ function sourceBaseUrls() {
     kleinanzeigen: "https://www.kleinanzeigen.de/s-suchanfrage.html?keywords=",
     facebook: "https://www.facebook.com/marketplace/search/?query=",
     mobilede: "https://suchen.mobile.de/fahrzeuge/auto/search.html?ft=",
+    marktplaats: "https://www.marktplaats.nl/q/",
     html: "",
   };
 }
@@ -1401,6 +1415,7 @@ function parseSearchUrlParameters(value) {
   if (host.includes("kleinanzeigen.de")) return parseKleinanzeigenUrl(url);
   if (host === "facebook.com" || host.endsWith(".facebook.com")) return parseFacebookMarketplaceUrl(url);
   if (host === "mobile.de" || host.endsWith(".mobile.de")) return parseMobileDeUrl(url);
+  if (host === "marktplaats.nl" || host.endsWith(".marktplaats.nl")) return parseMarktplaatsUrl(url);
   return {};
 }
 
@@ -1436,6 +1451,20 @@ function parseMobileDeUrl(url) {
     source: "mobilede",
     query: humanizeUrlTerm(url.searchParams.get("ft") || url.searchParams.get("q") || ""),
     category,
+  };
+}
+
+function parseMarktplaatsUrl(url) {
+  const segments = url.pathname.split("/").filter(Boolean).map((part) => decodeURIComponent(part));
+  const queryIndex = segments.indexOf("q");
+  const query = queryIndex >= 0 ? segments[queryIndex + 1] : url.searchParams.get("query") || url.searchParams.get("q") || "";
+  const category = providerCategories.marktplaats.find((item) => url.pathname.includes(`/l/${item.path}/`))?.label || "";
+  const location = url.searchParams.get("distanceMeters") ? url.searchParams.get("postcode") || "" : "";
+  return {
+    source: "marktplaats",
+    query: humanizeUrlTerm(query),
+    category,
+    location,
   };
 }
 
@@ -1929,7 +1958,7 @@ async function createWizardDraftWithAi() {
 }
 
 function applyWizardDraft(draft) {
-  const source = ["kleinanzeigen", "facebook", "mobilede"].includes(draft.source_type) ? draft.source_type : "kleinanzeigen";
+  const source = ["kleinanzeigen", "facebook", "mobilede", "marktplaats"].includes(draft.source_type) ? draft.source_type : "kleinanzeigen";
   $("#wizard-source").value = source;
   updateWizardCategories();
   const category = matchWizardCategory(source, draft.category_hint || "");
@@ -2013,6 +2042,10 @@ function buildWizardSearchUrl(source, query, category, kleinanzeigenTypes = sele
   if (source === "mobilede") {
     const path = category?.path || "fahrzeuge/auto/search.html";
     return `https://suchen.mobile.de/${path}?ft=${encodeURIComponent(query)}`;
+  }
+  if (source === "marktplaats") {
+    const path = category?.path ? `/l/${category.path}/q/` : "/q/";
+    return `https://www.marktplaats.nl${path}${keywordUrlPath(query)}/`;
   }
   if (source === "kleinanzeigen" && category?.id && category?.path) {
     return `https://www.kleinanzeigen.de/s-${category.path}${kleinanzeigenTypeSegment(kleinanzeigenTypes)}/${keywordUrlPath(query)}/k0c${category.id}`;
