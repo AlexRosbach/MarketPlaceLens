@@ -42,6 +42,17 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
+### Resetting Admin Access
+
+If an admin password is lost, use the container CLI to reset it directly in SQLite:
+
+```bash
+docker exec -it marketplacelens reset-password
+docker exec marketplacelens reset-password --username admin --password "MyNewPass123"
+```
+
+The command enables the selected admin user and updates its password hash without depending on a running API session.
+
 ## 2. Core Concepts
 
 ### Jobs
@@ -110,6 +121,8 @@ Listings can be:
 - marked contacted
 - shown on a map by ZIP/place
 - enriched with AI assessment text
+
+Listing and swipe cards use product-focused motion inspired by Kramlet: cards enter with a short stagger, lift subtly on hover, images zoom within the card frame, and the swipe card follows the pointer while dragging before it settles back or advances.
 
 The default active listing view excludes seen and hidden items unless the user explicitly changes filters.
 
