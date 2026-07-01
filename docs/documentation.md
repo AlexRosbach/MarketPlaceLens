@@ -42,6 +42,17 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
+### Resetting Admin Access
+
+If an admin password is lost, use the container CLI to reset it directly in SQLite:
+
+```bash
+docker exec -it marketplacelens reset-password
+docker exec marketplacelens reset-password --username admin --password "MyNewPass123"
+```
+
+The command enables the selected admin user and updates its password hash without depending on a running API session.
+
 ## 2. Core Concepts
 
 ### Jobs

@@ -83,6 +83,13 @@ http://<your-host-ip>:8091
 
 On first start, MarketPlaceLens asks you to create the first admin account.
 
+To reset an admin password from the container CLI:
+
+```bash
+docker exec -it marketplacelens reset-password
+docker exec marketplacelens reset-password --username admin --password "MyNewPass123"
+```
+
 ## Docker Images
 
 ```bash

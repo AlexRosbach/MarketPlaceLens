@@ -42,3 +42,14 @@ docker compose up -d
 ```
 
 Schema migrations run automatically during startup.
+
+## Reset Admin Password
+
+If you lose admin access, reset an admin password directly inside the container:
+
+```bash
+docker exec -it marketplacelens reset-password
+docker exec marketplacelens reset-password --username admin --password "MyNewPass123"
+```
+
+The command updates the local SQLite database, enables the selected admin account, and does not require the web app to be reachable.
