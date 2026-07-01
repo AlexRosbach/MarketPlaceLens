@@ -2313,17 +2313,37 @@ function bindReviewGestures(card) {
   card.addEventListener("dblclick", reviewWatchCurrent);
   card.addEventListener("pointerdown", (event) => {
     state.reviewPointer = { x: event.clientX, y: event.clientY, id: event.pointerId };
+    card.classList.add("dragging");
+    card.style.setProperty("--drag-x", "0px");
+    card.style.setProperty("--drag-rotate", "0deg");
     card.setPointerCapture?.(event.pointerId);
+  });
+  card.addEventListener("pointermove", (event) => {
+    const start = state.reviewPointer;
+    if (!start || start.id !== event.pointerId) return;
+    const dx = event.clientX - start.x;
+    const clamped = Math.max(-130, Math.min(130, dx));
+    card.style.setProperty("--drag-x", `${clamped}px`);
+    card.style.setProperty("--drag-rotate", `${clamped / 24}deg`);
   });
   card.addEventListener("pointerup", async (event) => {
     const start = state.reviewPointer;
     state.reviewPointer = null;
+    card.classList.remove("dragging");
+    card.style.setProperty("--drag-x", "0px");
+    card.style.setProperty("--drag-rotate", "0deg");
     if (!start || start.id !== event.pointerId) return;
     const dx = event.clientX - start.x;
     const dy = event.clientY - start.y;
     if (Math.abs(dx) > 90 && Math.abs(dx) > Math.abs(dy) * 1.4) {
       await reviewSeenCurrent();
     }
+  });
+  card.addEventListener("pointercancel", () => {
+    state.reviewPointer = null;
+    card.classList.remove("dragging");
+    card.style.setProperty("--drag-x", "0px");
+    card.style.setProperty("--drag-rotate", "0deg");
   });
 }
 
@@ -2623,7 +2643,7 @@ async function loadListingBrowser(containerSelector, watchlistedOnly) {
   updatePaginationControls(watchlistedOnly, total);
   if (!watchlistedOnly) updateListingsSummary(total);
   browser.innerHTML = listings.length
-    ? listings.map((listing) => listingMarkup(listing)).join("")
+    ? listings.map((listing, index) => listingMarkup(listing, index)).join("")
     : `<article class="listing-card empty-listing"><strong>${escapeHtml(t(watchlistedOnly ? "empty.noWatchlist" : "empty.noListings"))}</strong><p class="meta">${escapeHtml(t(watchlistedOnly ? "empty.noWatchlistHint" : "empty.noListingsHint"))}</p></article>`;
   browser.querySelectorAll("[data-listing-action]").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -2837,7 +2857,7 @@ function listingDateFact(listing) {
   return "";
 }
 
-function listingMarkup(listing) {
+function listingMarkup(listing, index = 0) {
   const watchlistAction = listing.watchlisted ? "remove" : "add";
   const watchlistLabel = listing.watchlisted ? t("listing.removeWatchlist") : t("listing.addWatchlist");
   const watchlistBadges = listing.watchlists?.length
@@ -2850,7 +2870,7 @@ function listingMarkup(listing) {
     t("listing.score", { score: listing.score }),
   ].filter(Boolean);
   return `
-    <article class="listing-card ${listing.watchlisted ? "watchlisted" : ""}">
+    <article class="listing-card ${listing.watchlisted ? "watchlisted" : ""}" style="--card-index: ${index % 12}">
       <div class="listing-media">
         ${listing.thumbnail_url ? `
           <img class="listing-image" src="/api/listings/${listing.id}/image" alt="${escapeAttribute(listing.title)}" loading="lazy">

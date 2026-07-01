@@ -122,6 +122,8 @@ Listings can be:
 - shown on a map by ZIP/place
 - enriched with AI assessment text
 
+Listing and swipe cards use product-focused motion inspired by Kramlet: cards enter with a short stagger, lift subtly on hover, images zoom within the card frame, and the swipe card follows the pointer while dragging before it settles back or advances.
+
 The default active listing view excludes seen and hidden items unless the user explicitly changes filters.
 
 ## 6. Notifications

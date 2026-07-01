@@ -244,6 +244,17 @@ select {
   }
 }
 
+@keyframes kramlet-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
 @keyframes tab-glow {
   0%,
   100% {
@@ -2030,13 +2041,16 @@ textarea.chip-source {
   background: var(--surface);
   box-shadow: 0 14px 38px rgba(29, 42, 36, 0.11);
   padding: 12px;
-  transition: transform 170ms ease, box-shadow 170ms ease, border-color 170ms ease;
+  animation: kramlet-card-in 360ms cubic-bezier(0.2, 0.82, 0.2, 1) backwards;
+  animation-delay: calc(var(--card-index, 0) * 28ms);
+  will-change: transform;
+  transition: transform 220ms cubic-bezier(0.2, 0.82, 0.2, 1), box-shadow 220ms ease, border-color 220ms ease, background 220ms ease;
 }
 
 .listing-card:hover {
   border-color: color-mix(in srgb, var(--brand) 38%, var(--line));
-  box-shadow: 0 18px 44px rgba(24, 35, 29, 0.14);
-  transform: translateY(-2px);
+  box-shadow: 0 24px 64px rgba(24, 35, 29, 0.18);
+  transform: translateY(-4px) scale(1.004);
 }
 
 .listing-card.watchlisted {
@@ -2102,6 +2116,11 @@ textarea.chip-source {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  transition: transform 520ms cubic-bezier(0.2, 0.82, 0.2, 1), filter 220ms ease;
+}
+
+.listing-card:hover .listing-media img {
+  transform: scale(1.035);
 }
 
 .image-load {
@@ -2474,6 +2493,8 @@ textarea.chip-source {
 }
 
 .review-card {
+  --drag-x: 0px;
+  --drag-rotate: 0deg;
   display: grid;
   grid-template-columns: minmax(280px, 0.82fr) minmax(0, 1fr);
   overflow: hidden;
@@ -2481,8 +2502,22 @@ textarea.chip-source {
   border-radius: 8px;
   background: var(--surface);
   box-shadow: 0 18px 52px rgba(29, 42, 36, 0.13);
+  animation: kramlet-card-in 360ms cubic-bezier(0.2, 0.82, 0.2, 1) backwards;
   touch-action: pan-y;
+  transform: translateX(var(--drag-x)) rotate(var(--drag-rotate));
+  transition: transform 220ms cubic-bezier(0.2, 0.82, 0.2, 1), box-shadow 220ms ease, border-color 220ms ease;
   user-select: none;
+}
+
+.review-card:hover {
+  border-color: color-mix(in srgb, var(--brand) 34%, var(--line));
+  box-shadow: 0 26px 72px rgba(24, 35, 29, 0.18);
+}
+
+.review-card.dragging {
+  box-shadow: 0 30px 82px rgba(24, 35, 29, 0.22);
+  cursor: grabbing;
+  transition: box-shadow 160ms ease, border-color 160ms ease;
 }
 
 .review-card.empty-review {
@@ -2504,6 +2539,11 @@ textarea.chip-source {
   min-height: 470px;
   object-fit: cover;
   display: block;
+  transition: transform 520ms cubic-bezier(0.2, 0.82, 0.2, 1), filter 220ms ease;
+}
+
+.review-card:hover .review-image {
+  transform: scale(1.025);
 }
 
 .review-image.placeholder {
@@ -3318,5 +3358,11 @@ textarea.chip-source {
     animation-duration: 1ms !important;
     scroll-behavior: auto !important;
     transition-duration: 1ms !important;
+  }
+
+  .listing-card,
+  .review-card {
+    animation: none !important;
+    transform: none !important;
   }
 }
