@@ -83,6 +83,26 @@ http://<your-host-ip>:8091
 
 On first start, MarketPlaceLens asks you to create the first admin account.
 
+## Deployment
+
+### Deploy to Diploi
+
+[![Launch with Diploi](https://diploi.com/launch-big.svg)](https://diploi.com/launch/AlexRosbach/MarketPlaceLens)
+
+1. **Launch the project**
+
+   Click the launch button above to create a new Diploi deployment.
+
+2. **Add environment variables**
+
+   In Diploi, open your deployment page and go to **Options > FastAPI > Environment**. Add any required environment variables.
+
+3. **Preview the deployment**
+
+   Open the provided preview URL from your Diploi deployment page.
+
+For more information, please visit [diploi.com](https://diploi.com/).
+
 ## Docker Images
 
 ```bash
