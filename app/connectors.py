@@ -392,7 +392,7 @@ class HtmlListingConnector(MarketplaceConnector):
             listing_url = urljoin("https://www.marktplaats.nl", str(anchor.get("href") or ""))
             if not is_marktplaats_listing_url(listing_url):
                 continue
-            title = clean_text(first_text(card, ["[class*=ListingTitle]", ".hz-title-description", "h2", "h3"]))
+            title = clean_text(first_text(card, ["span[class*=ListingTitle]", "h2", "h3"]))
             if not title or is_non_listing_artifact(self.source_type, title, listing_url):
                 continue
             price_text = clean_text(first_text(card, ["[class*=ListingPrice]", ".hz-price-date-feature", "[class*=price]"]))
