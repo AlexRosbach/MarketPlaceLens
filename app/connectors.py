@@ -53,6 +53,10 @@ class MarketplaceConnector:
             host = parsed.netloc.lower()
             if host not in {"mobile.de", "www.mobile.de", "suchen.mobile.de"}:
                 raise ValueError("mobile.de jobs need a mobile.de or suchen.mobile.de URL.")
+        if self.source_type == "marktplaats":
+            host = parsed.netloc.lower()
+            if host not in {"marktplaats.nl", "www.marktplaats.nl"}:
+                raise ValueError("Marktplaats jobs need a marktplaats.nl URL.")
 
     async def fetch_listings(self, profile: dict) -> list[ListingCandidate]:
         raise NotImplementedError
@@ -85,7 +89,7 @@ class HtmlListingConnector(MarketplaceConnector):
         self.validate_search_url(search_url)
         user_agent = (
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-            if self.source_type in {"facebook", "mobilede"}
+            if self.source_type in {"facebook", "mobilede", "marktplaats"}
             else settings.user_agent
         )
         request_headers = {
@@ -155,6 +159,14 @@ class HtmlListingConnector(MarketplaceConnector):
                 raise ValueError(
                     "mobile.de returned HTML without embedded public vehicle results. "
                     "Use a concrete mobile.de search result URL copied from the browser."
+                )
+            return listings
+        if self.source_type == "marktplaats":
+            listings = self.parse_marktplaats_listings(response.text, profile)
+            if not listings:
+                raise ValueError(
+                    "Marktplaats returned HTML without public listing cards. "
+                    "Use a public Marktplaats search result URL copied from the browser."
                 )
             return listings
         return self.parse_listings(response.text, profile)
@@ -368,6 +380,50 @@ class HtmlListingConnector(MarketplaceConnector):
             candidates.append(candidate)
         return candidates
 
+    def parse_marktplaats_listings(self, html: str, profile: dict) -> list[ListingCandidate]:
+        soup = BeautifulSoup(html, "html.parser")
+        cards = [node for node in soup.select("li.hz-Listing") if isinstance(node, Tag)]
+        candidates: list[ListingCandidate] = []
+        seen: set[str] = set()
+        for card in cards[:200]:
+            anchor = card.select_one("a[href^='/v/']")
+            if not isinstance(anchor, Tag):
+                continue
+            listing_url = urljoin("https://www.marktplaats.nl", str(anchor.get("href") or ""))
+            if not is_marktplaats_listing_url(listing_url):
+                continue
+            title = clean_text(first_text(card, ["[class*=ListingTitle]", ".hz-title-description", "h2", "h3"]))
+            if not title or is_non_listing_artifact(self.source_type, title, listing_url):
+                continue
+            price_text = clean_text(first_text(card, ["[class*=ListingPrice]", ".hz-price-date-feature", "[class*=price]"]))
+            location_text = clean_text(first_text(card, ["[class*=ListingLocation]", "[data-testid=location-label]"]))
+            posted_at_text = clean_text(first_text(card, ["[class*=ListingDate]", "time", "[class*=date]"]))
+            snippet = clean_text(first_text(card, ["[class*=ListingDescription]", "[class*=description]", "p"]))
+            image = card.find("img")
+            thumbnail_url = ""
+            if isinstance(image, Tag):
+                thumbnail_url = urljoin("https://www.marktplaats.nl", str(image.get("src") or image.get("data-src") or ""))
+            source_listing_id = extract_listing_id(listing_url)
+            hash_input = "|".join([source_listing_id, title, price_text, location_text])
+            candidate = ListingCandidate(
+                source_type=self.source_type,
+                source_listing_id=source_listing_id,
+                title=title,
+                price_text=price_text,
+                price_value=parse_price(price_text),
+                location_text=location_text,
+                category_text="",
+                posted_at_text=posted_at_text,
+                description_snippet=snippet[:400],
+                listing_url=listing_url,
+                thumbnail_url=thumbnail_url,
+                content_hash=hashlib.sha256(hash_input.encode("utf-8")).hexdigest(),
+            )
+            if candidate.content_hash not in seen:
+                seen.add(candidate.content_hash)
+                candidates.append(candidate)
+        return candidates
+
     def normalize_mobilede_listing(self, item: dict, base_url: str) -> ListingCandidate | None:
         listing_id = str(item.get("id") or "")
         title = clean_text(item.get("title") or " ".join([str(item.get("shortTitle") or ""), str(item.get("subTitle") or "")]))
@@ -577,6 +633,11 @@ def first_text(card: Tag, selectors: list[str]) -> str:
 def is_kleinanzeigen_listing_url(url: str) -> bool:
     parsed = urlparse(urljoin("https://www.kleinanzeigen.de", url))
     return "kleinanzeigen.de" in parsed.netloc.lower() and "/s-anzeige/" in parsed.path
+
+
+def is_marktplaats_listing_url(url: str) -> bool:
+    parsed = urlparse(urljoin("https://www.marktplaats.nl", url))
+    return parsed.netloc.lower() in {"marktplaats.nl", "www.marktplaats.nl"} and parsed.path.startswith("/v/")
 
 
 def is_non_listing_artifact(source_type: str, title: str, listing_url: str) -> bool:
@@ -805,6 +866,6 @@ def extract_mobilede_initial_state(html: str) -> dict:
 
 
 def get_connector(source_type: str) -> MarketplaceConnector:
-    if source_type in {"html", "kleinanzeigen", "facebook", "mobilede"}:
+    if source_type in {"html", "kleinanzeigen", "facebook", "mobilede", "marktplaats"}:
         return HtmlListingConnector(source_type)
     raise ValueError(f"Unsupported source type: {source_type}")

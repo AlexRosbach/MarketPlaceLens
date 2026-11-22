@@ -1039,7 +1039,7 @@ async def verify_unseen_listing_availability(
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-            if profile["source_type"] in {"facebook", "mobilede"}
+            if profile["source_type"] in {"facebook", "mobilede", "marktplaats"}
             else settings.user_agent
         ),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -1521,8 +1521,8 @@ def search_draft_prompt(prompt: str, language: str) -> list[dict[str, str]]:
             "content": (
                 "You convert one natural-language marketplace search wish into a structured job draft. "
                 "Return only one JSON object, without markdown or explanations. "
-                "Allowed source_type values: kleinanzeigen, facebook, mobilede. "
-                "Use kleinanzeigen unless the user clearly asks for Facebook Marketplace, mobile.de, cars, or vehicles. "
+                "Allowed source_type values: kleinanzeigen, facebook, mobilede, marktplaats. "
+                "Use kleinanzeigen unless the user clearly asks for Facebook Marketplace, mobile.de, cars, vehicles, or Marktplaats. "
                 "Keep query to the product/search words only; put prices, radius, location, and listing age only in their fields. "
                 "For Kleinanzeigen category_hint, prefer a precise category path such as 'Elektronik > Notebooks' for laptops. "
                 "Use null for unknown numeric values and [] for empty keyword arrays."
@@ -1550,7 +1550,7 @@ def normalize_search_draft(text: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise HTTPException(502, "AI provider did not return a valid search draft")
     source_type = str(data.get("source_type") or "kleinanzeigen").strip().lower()
-    if source_type not in {"kleinanzeigen", "facebook", "mobilede"}:
+    if source_type not in {"kleinanzeigen", "facebook", "mobilede", "marktplaats"}:
         source_type = "kleinanzeigen"
     query = clean_ai_string(data.get("query")) or clean_ai_string(data.get("name"))
     if not query:

@@ -88,6 +88,7 @@ Review mode shows one listing at a time with image, price, location, source, AI 
 | Kleinanzeigen | Stable primary path | Best-supported connector. Supports public search/category URLs, price, age, keyword, location/radius, and listing type handling. |
 | Facebook Marketplace | **In testing** | Works only when Facebook returns listing links to the server. Facebook frequently returns login, consent, location, or JavaScript shell pages. Optional Cookie headers are stored locally and sent only to `facebook.com`. |
 | mobile.de | **In testing** | Reads public search pages when embedded vehicle result data is available. The official mobile.de Search API needs separate Basic Auth access. |
+| Marktplaats.nl | **In testing** | Reads public Dutch search result pages and normalizes listings into the regular review flow. Use public search URLs only; login, CAPTCHA, rate limits, and platform access controls are not bypassed. |
 | Generic HTML | Experimental | Basic fallback for simple link-card result pages. It is not a universal parser. |
 
 MarketPlaceLens does not bypass login walls, CAPTCHA, bot protection, private APIs, blocked sessions, or platform access controls.

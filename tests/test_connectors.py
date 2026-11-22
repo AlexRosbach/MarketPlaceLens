@@ -105,6 +105,36 @@ class ConnectorTests(unittest.TestCase):
 
         validate_public_fetch_host("www.kleinanzeigen.de")
 
+    def test_marktplaats_connector_requires_marktplaats_url(self) -> None:
+        connector = HtmlListingConnector("marktplaats")
+        connector.validate_search_url("https://www.marktplaats.nl/q/fiets/")
+        with self.assertRaises(ValueError):
+            connector.validate_search_url("https://example.com/q/fiets/")
+
+    def test_marktplaats_parser_reads_public_listing_cards(self) -> None:
+        html = """
+        <ul><li class="hz-Listing">
+          <a href="/v/fietsen-en-brommers/fietsen/a1533245711-stadsfiets">Listing</a>
+          <span class="ListingTitle_hz-Listing-title-new">Stadsfiets</span>
+          <span class="ListingDescription_hz-Listing-description-new">Goed onderhouden fiets.</span>
+          <h5 class="ListingPrice_hz-Listing-price">€ 125,00</h5>
+          <span class="ListingLocationDetails_hz-Listing-location-label">Amsterdam</span>
+          <span class="ListingDate_hz-Listing-date">Vandaag</span>
+        </li></ul>
+        """
+
+        listings = HtmlListingConnector("marktplaats").parse_marktplaats_listings(
+            html, {"search_url": "https://www.marktplaats.nl/q/fiets/"}
+        )
+
+        self.assertEqual(len(listings), 1)
+        listing = listings[0]
+        self.assertEqual(listing.source_type, "marktplaats")
+        self.assertEqual(listing.title, "Stadsfiets")
+        self.assertEqual(listing.price_value, 125.0)
+        self.assertEqual(listing.location_text, "Amsterdam")
+        self.assertEqual(listing.listing_url, "https://www.marktplaats.nl/v/fietsen-en-brommers/fietsen/a1533245711-stadsfiets")
+
     def test_kleinanzeigen_location_hint_is_added_to_search_url(self) -> None:
         url = apply_kleinanzeigen_location_to_url(
             "https://www.kleinanzeigen.de/s-suchanfrage.html?keywords=stuhl",
