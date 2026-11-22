@@ -167,6 +167,31 @@ class ConnectorTests(unittest.TestCase):
         self.assertEqual(listing.posted_at_text, "Heute")
         self.assertEqual(listing.listing_url, "https://www.kleinanzeigen.de/s-anzeige/eiche-stuhl/12345-86-1")
 
+    def test_kleinanzeigen_parser_reads_current_article_cards(self) -> None:
+        html = """
+        <ul id="srchrslt-adtable">
+          <li><article data-adid="3576636749" data-href="/s-anzeige/macbook-pro/3576636749-278-18709">
+            <div class="text-onSurfaceNonessential"><span>60311 Altstadt</span></div>
+            <h3><a href="/s-anzeige/macbook-pro/3576636749-278-18709">MacBook Pro</a></h3>
+            <p class="text-title3">335 € VB</p>
+            <p class="text-onSurfaceSubdued">Gepflegtes Notebook.</p>
+          </article></li>
+        </ul>
+        """
+
+        listings = HtmlListingConnector("kleinanzeigen").parse_kleinanzeigen_listings(
+            html,
+            {"search_url": "https://www.kleinanzeigen.de/s-notebooks/anzeige:angebote/macbook/k0c278"},
+        )
+
+        self.assertEqual(len(listings), 1)
+        listing = listings[0]
+        self.assertEqual(listing.source_listing_id, "3576636749")
+        self.assertEqual(listing.title, "MacBook Pro")
+        self.assertEqual(listing.price_text, "335 € VB")
+        self.assertEqual(listing.price_value, 335.0)
+        self.assertEqual(listing.location_text, "60311 Altstadt")
+
     def test_kleinanzeigen_parser_reads_time_datetime_when_visible_text_is_empty(self) -> None:
         html = """
         <ul id="srchrslt-adtable">

@@ -260,7 +260,14 @@ class HtmlListingConnector(MarketplaceConnector):
 
     def parse_kleinanzeigen_listings(self, html: str, profile: dict) -> list[ListingCandidate]:
         soup = BeautifulSoup(html, "html.parser")
-        cards = [node for node in soup.select("#srchrslt-adtable .ad-listitem, .aditem") if isinstance(node, Tag)]
+        # Kleinanzeigen migrated its search result cards from the legacy
+        # ``.aditem`` markup to ``article[data-adid]``.  Keep both selectors
+        # while the old response shape is still encountered in cached pages.
+        cards = [
+            node
+            for node in soup.select("#srchrslt-adtable .ad-listitem, .aditem, #srchrslt-adtable article[data-adid]")
+            if isinstance(node, Tag)
+        ]
         if not cards:
             return []
 
@@ -288,8 +295,12 @@ class HtmlListingConnector(MarketplaceConnector):
         title = clean_text(first_text(card, [".aditem-main .text-module-begin", ".ellipsis", "h2", "h3", "a"]))
         if not title or not listing_url or is_non_listing_artifact(self.source_type, title, listing_url):
             return None
-        price_text = clean_text(first_text(card, [".aditem-main--middle--price-shipping--price", "[class*=price]"]))
-        location_text = clean_text(first_text(card, [".aditem-main--top--left", "[class*=location]"]))
+        price_text = clean_text(
+            first_text(card, [".aditem-main--middle--price-shipping--price", "[class*=price]", "p.text-title3"])
+        )
+        location_text = clean_text(
+            first_text(card, [".aditem-main--top--left", "[class*=location]", ".text-onSurfaceNonessential span"])
+        )
         posted_at_text = parse_kleinanzeigen_card_posted_at(card)
         tags = clean_text(first_text(card, [".aditem-main--middle--tags"]))
         snippet = clean_text(first_text(card, [".aditem-main--middle--description", "[class*=description]", "p"]))
