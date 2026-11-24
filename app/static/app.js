@@ -1200,6 +1200,7 @@ async function logout() {
 
 async function loadSummary() {
   const summary = await api("/api/summary");
+  const health = isAdmin() ? await api("/api/connector-health").catch(() => []) : [];
   $("#summary-active").textContent = `${summary.profiles_enabled}/${summary.profiles_total}`;
   $("#summary-new").textContent = summary.listings_new;
   $("#summary-watchlisted").textContent = summary.listings_watchlisted;
@@ -1227,6 +1228,7 @@ async function loadSummary() {
         <span class="source-badge ${escapeAttribute(source.source_type)}">${escapeHtml(sourceLabel(source.source_type))}</span>
         <strong>${source.profile_count || 0}</strong>
         <p class="meta">${escapeHtml(t("profiles.title"))} · ${source.listing_count || 0} ${escapeHtml(t("nav.listings"))}</p>
+        ${health.filter(item => item.source_type === source.source_type).map(item => `<p class="meta">${item.successful}/${item.runs} ${state.language === "de" ? "erfolgreich" : "successful"} · Ø ${item.average_seconds ?? "–"} s · ${escapeHtml(item.last_success || "–")}</p>`).join("")}
       </article>
     `).join("")
     : `<article><strong>${escapeHtml(t("empty.noProfiles"))}</strong><p class="meta">${escapeHtml(t("empty.noProfilesHint"))}</p></article>`;
@@ -2314,14 +2316,15 @@ document.addEventListener("toggle", async (event) => {
   content.textContent = de ? "Lade Preise …" : "Loading prices …";
   try {
     const id = Number(panel.dataset.listingId);
-    const [comparison, history] = await Promise.all([
-      api(`/api/listings/${id}/new-price-comparison`), api(`/api/listings/${id}/price-history`)
+    const [comparison, history, duplicates] = await Promise.all([
+      api(`/api/listings/${id}/new-price-comparison`), api(`/api/listings/${id}/price-history`), api(`/api/listings/${id}/possible-duplicates`)
     ]);
     const money = (value) => new Intl.NumberFormat(de ? "de-DE" : "en-GB", {style:"currency",currency:"EUR"}).format(value);
     const offers = comparison.offers.map(offer => `<p><a href="${escapeAttribute(safeExternalUrl(offer.url))}" target="_blank" rel="noopener noreferrer">${escapeHtml(offer.provider)}: ${escapeHtml(money(offer.price))}</a> · ${escapeHtml(offer.title)} · ${de ? "Ähnlicher Treffer" : "Possible match"} (${Math.round(offer.match_confidence * 100)}%) · ${offer.shipping === null ? (de ? "Versand unbekannt" : "Shipping unknown") : escapeHtml(money(offer.shipping))}</p>`).join("");
     const links = Object.entries(comparison.links).map(([name, url]) => `<a href="${escapeAttribute(safeExternalUrl(url))}" target="_blank" rel="noopener noreferrer">${escapeHtml(name === "amazon" ? "Amazon" : "eBay")} ${de ? "Suche" : "search"}</a>`).join(" · ");
+    const duplicatesHtml = duplicates.map(item => `<li><a href="${escapeAttribute(safeExternalUrl(item.listing_url))}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.title)}</a> · ${escapeHtml(item.source_type)} · ${Math.round(item.confidence*100)}%</li>`).join("");
     const historyHtml = history.slice(0, 10).map(entry => `<li>${escapeHtml(money(entry.price_value))} · ${escapeHtml(entry.observed_at)}</li>`).join("");
-    content.innerHTML = `${offers || (de ? "Keine verifizierten Neupreise verfügbar." : "No verified new-item prices available.")}<p>${links}</p>${comparison.fetched_at ? `<p>${escapeHtml(comparison.fetched_at)}</p>` : ""}<p>${de ? "Amazon: derzeit nur Suchlink. Bitte Variante und Zustand prüfen." : "Amazon: search link only. Verify model, variant and condition."}</p><ul>${historyHtml}</ul>`;
+    content.innerHTML = `${offers || (de ? "Keine verifizierten Neupreise verfügbar." : "No verified new-item prices available.")}<p>${links}</p>${comparison.fetched_at ? `<p>${escapeHtml(comparison.fetched_at)}</p>` : ""}<p>${de ? "Amazon: derzeit nur Suchlink. Bitte Variante und Zustand prüfen." : "Amazon: search link only. Verify model, variant and condition."}</p><ul>${historyHtml}</ul>${duplicatesHtml ? `<p>${de ? "Mögliche Duplikate" : "Possible duplicates"}</p><ul>${duplicatesHtml}</ul>` : ""}`;
   } catch {
     content.textContent = de ? "Preisvergleich nicht verfügbar. Erneut öffnen zum Wiederholen." : "Price comparison unavailable. Reopen to retry.";
     delete panel.dataset.loaded;

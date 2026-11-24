@@ -33,7 +33,12 @@ def apply_filters(candidate: ListingCandidate, profile: dict) -> FilterResult:
         if candidate.price_value > float(profile["max_price"]):
             return FilterResult("hidden", 0, "above_max_price", "price above maximum")
 
-    location_terms = location_filter_terms(profile.get("location_hint", ""))
+    location_hint = profile.get("location_hint", "")
+    # Radius filtering requires provider-supported coordinates; unsupported sources
+    # must not silently claim that distance has been verified.
+    if has_radius_hint(location_hint) and candidate.source_type != "kleinanzeigen":
+        return FilterResult("hidden", 0, "radius_unverified", "radius cannot be verified for this source")
+    location_terms = location_filter_terms(location_hint)
     if location_terms and not any(term in candidate.location_text.lower() for term in location_terms):
         return FilterResult("hidden", 0, "location_mismatch", "location does not match profile")
 

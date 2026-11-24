@@ -128,3 +128,9 @@ Open **New-price comparison & price history** on a listing or review card. Confi
 
 ### Performance and reliability
 Search results are cached for two minutes per user/source/query/session, images for ten minutes within a 32 MiB memory budget. Availability checks are bounded and only revisit stale, unseen listings. Price history and optional target-price notifications are based on marketplace listings, not Amazon prices. Notification delivery is asynchronous and retried up to five times (at-least-once; duplicate delivery is possible after an ambiguous network failure). `GET /api/connector-health` exposes aggregate run metrics to administrators.
+
+
+### Duplicate candidates and maintenance
+The price details panel also lists possible cross-source duplicates with a conservative title/model/price/location match. Results are suggestions only and never delete or merge listings. Radius filters outside supported sources are marked unverified and hidden rather than claiming a verified distance. Full geocoding remains a follow-up.
+
+Use `docker exec marketplacelens python -m app.cli.housekeeping backup /data/backups/backup.db` for a consistent SQLite backup (new filename required). Use `docker exec marketplacelens python -m app.cli.housekeeping cleanup --days 180` to preview old, unprotected rows; add `--apply` only after a verified backup. Schedule these commands externally if required. Keep backups private and use unique filenames. Automatic retention/rotation is not enabled.

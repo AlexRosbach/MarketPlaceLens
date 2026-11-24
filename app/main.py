@@ -30,6 +30,7 @@ from .version import APP_VERSION, version_payload
 from .price_comparison import compare_new_prices
 from .efficiency import BoundedCache, search_key, assessment_key
 from .delivery import enqueue, delivery_loop
+from .duplicates import duplicate_score
 
 search_cache = BoundedCache(120, 64)
 thumbnail_cache = BoundedCache(600, 256, 32 * 1024 * 1024)
@@ -735,6 +736,32 @@ async def connector_health(request: Request) -> list[dict[str, Any]]:
             ROUND(AVG((julianday(r.finished_at) - julianday(r.started_at)) * 86400), 2) AS average_seconds
             FROM run_logs r JOIN watch_profiles p ON p.id = r.profile_id
             GROUP BY p.source_type""").fetchall()]
+
+
+@app.get("/api/listings/{listing_id}/possible-duplicates")
+async def possible_duplicates(listing_id: int, request: Request) -> list[dict[str, Any]]:
+    user = request_user(request)
+    with connect() as db:
+        if not can_access_listing(db, listing_id, user):
+            raise HTTPException(404, "Listing not found")
+        listing = db.execute("SELECT * FROM listings WHERE id = ?", (listing_id,)).fetchone()
+        if listing["price_value"] is None or not listing["location_text"]:
+            return []
+        price = listing["price_value"]
+        tolerance = max(2, 0.06 * price)
+        clause, values = profile_owner_filter(user)
+        rows = db.execute(
+            "SELECT listings.id, title, listings.source_type, location_text, price_value, listing_url FROM listings "
+            "JOIN watch_profiles ON watch_profiles.id = listings.profile_id "
+            "WHERE listings.source_type != ? AND price_value BETWEEN ? AND ? AND user_hidden = 0 "
+            + (" AND " + clause if clause else "") + " ORDER BY last_seen_at DESC LIMIT 500",
+            [listing["source_type"], price-tolerance, price+tolerance, *values]).fetchall()
+    matches = []
+    for row in rows:
+        score = duplicate_score(listing, row)
+        if score >= 0.85:
+            matches.append({**dict(row), "confidence": round(score, 2)})
+    return sorted(matches, key=lambda item: item["confidence"], reverse=True)[:10]
 
 
 @app.get("/api/listings/{listing_id}/price-history")
