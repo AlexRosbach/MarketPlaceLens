@@ -6,6 +6,8 @@ import json
 import re
 import socket
 import asyncio
+import ssl
+import httpcore
 from dataclasses import dataclass
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
@@ -78,29 +80,54 @@ def validate_public_fetch_host(hostname: str) -> None:
         raise ValueError("Search URLs must not target local or private network hosts.")
 
 
+async def resolve_public_addresses(host: str, port: int) -> list[str]:
+    validate_public_fetch_host(host)
+    records = await asyncio.wait_for(
+        asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM), timeout=5)
+    addresses = list(dict.fromkeys(record[4][0] for record in records))
+    if not addresses or any(not ipaddress.ip_address(address).is_global or
+                            ipaddress.ip_address(address).is_multicast for address in addresses):
+        raise ValueError("Non-public address")
+    return addresses
+
+
+class PublicNetworkBackend(httpcore.AnyIOBackend):
+    """Connect to a validated IP while httpcore retains the original TLS hostname."""
+    async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        try:
+            addresses = await resolve_public_addresses(host, port)
+        except (ValueError, OSError, TimeoutError) as exc:
+            raise httpcore.ConnectError("Outbound host is not permitted") from exc
+        last_error = None
+        for address in addresses:
+            try:
+                return await super().connect_tcp(address, port, timeout, local_address, socket_options)
+            except (httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
+                last_error = exc
+        raise last_error or httpcore.ConnectError("Outbound host is unavailable")
+
+
+class PublicHTTPTransport(httpx.AsyncHTTPTransport):
+    def __init__(self):
+        # httpx 0.28 delegates HTTP/TLS to this httpcore connection pool.
+        # Pin the verified destination at connection time (including redirects).
+        super().__init__(trust_env=False)
+        self._pool = httpcore.AsyncConnectionPool(
+            ssl_context=ssl.create_default_context(), network_backend=PublicNetworkBackend(),
+            max_connections=10, max_keepalive_connections=5)
+
+
 async def validate_public_request(request: httpx.Request) -> None:
-    """Validate every outbound request, including redirects, before connecting."""
     url = request.url
     host = url.host
     try:
         if url.scheme not in {"http", "https"} or not host or url.userinfo:
             raise ValueError("Unsupported outbound URL")
         validate_public_fetch_host(host)
-        records = await asyncio.wait_for(
-            asyncio.get_running_loop().getaddrinfo(host, url.port or (443 if url.scheme == "https" else 80),
-                                                   type=socket.SOCK_STREAM), timeout=5
-        )
-        if not records:
-            raise ValueError("No public address")
-        for record in records:
-            address = ipaddress.ip_address(record[4][0])
-            if not address.is_global or address.is_multicast:
-                raise ValueError("Non-public address")
         if "cookie" in request.headers and (url.scheme != "https" or host.lower() not in
                 {"facebook.com", "www.facebook.com", "m.facebook.com"}):
-            # Never forward manually configured Facebook session credentials.
             request.headers.pop("cookie", None)
-    except (ValueError, OSError, TimeoutError) as exc:
+    except ValueError as exc:
         raise httpx.RequestError("Outbound URL is not permitted", request=request) from exc
 
 
@@ -142,6 +169,7 @@ class HtmlListingConnector(MarketplaceConnector):
             follow_redirects=True,
             max_redirects=5,
             trust_env=False,
+            transport=PublicHTTPTransport(),
             event_hooks={"request": [validate_public_request]},
             timeout=20.0,
         ) as client:

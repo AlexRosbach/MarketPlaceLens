@@ -79,10 +79,10 @@ docker compose up -d
 Open:
 
 ```text
-http://<your-host-ip>:8091
+http://127.0.0.1:8091
 ```
 
-On first start, MarketPlaceLens asks you to create the first admin account.
+On first start, MarketPlaceLens asks you to create the first admin account. For trusted LAN access, explicitly set `MARKETPLACELENS_BIND_ADDRESS=0.0.0.0`. Set `MARKETPLACELENS_COOKIE_SECURE=true` behind an HTTPS reverse proxy. Existing sessions require a fresh sign-in after upgrading.
 
 To reset an admin password from the container CLI:
 

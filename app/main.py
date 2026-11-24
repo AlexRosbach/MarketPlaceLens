@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .auth import COOKIE_NAME, create_session, current_user_from_session, hash_password, valid_credentials, revoke_session
 from .config import settings
-from .connectors import ListingCandidate, facebook_browser_headers, get_connector, is_non_listing_artifact, parse_listing_availability, safe_cookie_header, validate_public_fetch_host, validate_public_request
+from .connectors import ListingCandidate, facebook_browser_headers, get_connector, is_non_listing_artifact, parse_listing_availability, safe_cookie_header, validate_public_fetch_host, validate_public_request, PublicHTTPTransport
 from .database import connect, encode_list, ensure_default_watchlist, init_db, row_to_listing, row_to_profile, utc_now
 from .filters import FilterResult, apply_filters
 from .notifier import TelegramNotifier, WebhookNotifier
@@ -67,7 +67,11 @@ async def require_session(request: Request, call_next):
     user = current_user_from_session(request.cookies.get(COOKIE_NAME))
     request.state.user = user
     if public or user:
-        return await call_next(request)
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
+        return response
     if path.startswith("/api/"):
         return JSONResponse({"detail": "Not authenticated"}, status_code=401)
     return RedirectResponse("/login", status_code=303)
@@ -286,6 +290,8 @@ async def update_user(user_id: int, payload: UserUpdatePayload, request: Request
             values.append(hash_password(payload.password))
         values.append(user_id)
         db.execute(f"UPDATE users SET {', '.join(updates)} WHERE id = ?", values)
+        if not payload.enabled or payload.password:
+            db.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user_id,))
         updated = db.execute(
             "SELECT id, username, role, enabled, created_at, updated_at, last_login_at FROM users WHERE id = ?",
             (user_id,),
@@ -707,6 +713,7 @@ async def listing_image(listing_id: int, request: Request) -> Response:
         follow_redirects=True,
         max_redirects=5,
         trust_env=False,
+        transport=PublicHTTPTransport(),
         event_hooks={"request": [validate_public_request]},
         timeout=20.0,
     ) as client:
@@ -832,8 +839,8 @@ async def get_settings(request: Request) -> dict[str, Any]:
     return {
         "telegram_bot_token": mask_secret(values.get("telegram_bot_token", "")),
         "telegram_bot_token_set": bool(values.get("telegram_bot_token")),
-        "telegram_chat_id": values.get("telegram_chat_id", ""),
-        "webhook_url": values.get("webhook_url", ""),
+        "telegram_chat_id": values.get("telegram_chat_id", "") if user.get("role") == "admin" else "",
+        "webhook_url": mask_secret(values.get("webhook_url", "")),
         "webhook_url_set": bool(values.get("webhook_url")),
         "global_rate_limit_seconds": int(values.get("global_rate_limit_seconds", "20") or 20),
         "default_watchlist_id": default_watchlist_id,
@@ -844,7 +851,7 @@ async def get_settings(request: Request) -> dict[str, Any]:
         "ai_provider": values.get("ai_provider", "openai") or "openai",
         "ai_api_key": mask_secret(values.get("ai_api_key", "")),
         "ai_api_key_set": bool(values.get("ai_api_key")),
-        "ai_base_url": values.get("ai_base_url", ""),
+        "ai_base_url": values.get("ai_base_url", "") if user.get("role") == "admin" else "",
         "ai_model": values.get("ai_model", "gpt-4o-mini") or "gpt-4o-mini",
         "ai_tone": values.get("ai_tone", "normal") or "normal",
         "facebook_cookie_header": mask_secret(values.get("facebook_cookie_header", "")),
@@ -859,13 +866,14 @@ async def update_settings(payload: SettingsPayload, request: Request) -> dict[st
         user_default_id = valid_watchlist_id(db, payload.default_watchlist_id)
         db.execute("UPDATE users SET default_watchlist_id = ?, updated_at = ? WHERE id = ?", (user_default_id, utc_now(), user["id"]))
         if user.get("role") == "admin":
+            current_webhook = get_setting(db, "webhook_url")
             current_token = get_setting(db, "telegram_bot_token")
             current_ai_key = get_setting(db, "ai_api_key")
             current_facebook_cookie = get_setting(db, "facebook_cookie_header")
             values = {
                 "telegram_bot_token": current_token if payload.telegram_bot_token == "********" else payload.telegram_bot_token,
                 "telegram_chat_id": payload.telegram_chat_id,
-                "webhook_url": payload.webhook_url,
+                "webhook_url": current_webhook if payload.webhook_url == "********" else payload.webhook_url,
                 "global_rate_limit_seconds": str(payload.global_rate_limit_seconds),
                 "ai_enabled": "1" if payload.ai_enabled else "0",
                 "ai_listing_assessments_enabled": "1" if payload.ai_listing_assessments_enabled else "0",
@@ -1091,7 +1099,7 @@ async def verify_unseen_listing_availability(
     if profile["source_type"] == "facebook" and facebook_cookie:
         headers["Cookie"] = facebook_cookie
     updates: list[tuple[str, str, int]] = []
-    async with httpx.AsyncClient(headers=headers, follow_redirects=True, max_redirects=5, trust_env=False, event_hooks={"request": [validate_public_request]}, timeout=12.0) as client:
+    async with httpx.AsyncClient(headers=headers, follow_redirects=True, max_redirects=5, trust_env=False, transport=PublicHTTPTransport(), event_hooks={"request": [validate_public_request]}, timeout=12.0) as client:
         for row in rows:
             availability = "unknown"
             try:

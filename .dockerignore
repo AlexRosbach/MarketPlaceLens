@@ -10,3 +10,17 @@ data
 node_modules
 .DS_Store
 docs/screenshots
+
+.env.*
+!.env.example
+*.secret
+*.pem
+*.key
+*.p12
+*.pfx
+*.log
+*.bak
+*.sqlite*
+*.db*
+backups/
+secrets/

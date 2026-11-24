@@ -16,7 +16,7 @@ docker compose up -d
 Open:
 
 ```text
-http://<your-host-ip>:8091
+http://127.0.0.1:8091
 ```
 
 Complete the first-run setup screen and create the initial admin password.
@@ -53,3 +53,6 @@ docker exec marketplacelens reset-password --username admin --password "MyNewPas
 ```
 
 The command updates the local SQLite database, enables the selected admin account, and does not require the web app to be reachable.
+
+
+For local-only access the Compose port binds to `127.0.0.1` by default. Set `MARKETPLACELENS_BIND_ADDRESS=0.0.0.0` only for intended LAN exposure and `MARKETPLACELENS_COOKIE_SECURE=true` for HTTPS. Existing users must sign in again after the session migration.

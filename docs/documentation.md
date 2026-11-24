@@ -30,7 +30,7 @@ docker compose up -d
 Open:
 
 ```text
-http://<your-host-ip>:8091
+http://127.0.0.1:8091
 ```
 
 On first start, MarketPlaceLens displays a platform-rules notice and then creates the first admin password. No normal deployment ships with a default password.
@@ -248,3 +248,6 @@ MarketPlaceLens is intended for private self-hosted use with URLs the operator i
 - No local thumbnail mirroring; images are proxied on demand
 
 The maintainer does not guarantee third-party platform compatibility and does not take responsibility for misuse, blocked accounts, denied access, data processing, or third-party policy violations.
+
+
+For local-only access the Compose port binds to `127.0.0.1` by default. Set `MARKETPLACELENS_BIND_ADDRESS=0.0.0.0` only for intended LAN exposure and `MARKETPLACELENS_COOKIE_SECURE=true` for HTTPS. Existing users must sign in again after the session migration.

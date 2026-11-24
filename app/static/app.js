@@ -2901,7 +2901,7 @@ function listingMarkup(listing, index = 0) {
       </div>
       <div class="listing-main">
         <div class="listing-title-row">
-          <a href="${escapeAttribute(listing.listing_url)}" target="_blank" rel="noopener">${escapeHtml(listing.title)}</a>
+          <a href="${escapeAttribute(safeExternalUrl(listing.listing_url))}" target="_blank" rel="noopener">${escapeHtml(listing.title)}</a>
           <div class="listing-badges">
             ${watchlistBadges}
             <span class="pill ${escapeAttribute(listing.status)}">${escapeHtml(statusLabel(listing.status))}</span>
@@ -3459,6 +3459,14 @@ function escapeHtml(value) {
     '"': "&quot;",
     "'": "&#039;",
   }[char]));
+}
+
+function safeExternalUrl(value) {
+  try {
+    const url = new URL(value);
+    if (["https:", "http:"].includes(url.protocol) && !url.username && !url.password) return url.href;
+  } catch {}
+  return "#";
 }
 
 function escapeAttribute(value) {
