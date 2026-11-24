@@ -5,6 +5,8 @@ import os
 import hmac
 from hashlib import sha256
 import hashlib
+import secrets
+import time
 
 from .config import settings
 from .database import connect
@@ -14,10 +16,25 @@ COOKIE_NAME = "marketplacelens_session"
 PASSWORD_ITERATIONS = 260000
 
 
+SESSION_TTL = 14 * 24 * 60 * 60
+
+
 def create_session(username: str) -> str:
-    payload = base64.urlsafe_b64encode(username.encode("utf-8")).decode("ascii")
-    signature = hmac.new(settings.session_secret.encode("utf-8"), payload.encode("ascii"), sha256).hexdigest()
-    return f"{payload}.{signature}"
+    token = secrets.token_urlsafe(32)
+    digest = hmac.new(settings.session_secret.encode(), token.encode(), sha256).hexdigest()
+    with connect() as db:
+        db.execute("DELETE FROM auth_sessions WHERE expires_at <= ?", (int(time.time()),))
+        db.execute("""INSERT INTO auth_sessions(token_hash, user_id, password_hash, expires_at)
+                      SELECT ?, id, password_hash, ? FROM users WHERE username = ? AND enabled = 1""",
+                   (digest, int(time.time()) + SESSION_TTL, username))
+    return token
+
+
+def revoke_session(value: str | None) -> None:
+    if value and len(value) <= 128:
+        digest = hmac.new(settings.session_secret.encode(), value.encode(), sha256).hexdigest()
+        with connect() as db:
+            db.execute("DELETE FROM auth_sessions WHERE token_hash = ?", (digest,))
 
 
 def valid_session(value: str | None) -> bool:
@@ -25,31 +42,21 @@ def valid_session(value: str | None) -> bool:
 
 
 def current_user_from_session(value: str | None) -> dict | None:
-    if not value or "." not in value:
+    if not value or len(value) > 128:
         return None
-    payload, signature = value.split(".", 1)
-    expected = hmac.new(settings.session_secret.encode("utf-8"), payload.encode("ascii"), sha256).hexdigest()
-    if not hmac.compare_digest(signature, expected):
-        return None
-    try:
-        username = base64.urlsafe_b64decode(payload.encode("ascii")).decode("utf-8")
-    except Exception:
-        return None
+    digest = hmac.new(settings.session_secret.encode(), value.encode(), sha256).hexdigest()
     try:
         with connect() as db:
-            row = db.execute(
-                """
-                SELECT id, username, role, enabled, display_name, buyer_location, contact_hint, inquiry_signature
-                FROM users
-                WHERE username = ?
-                """,
-                (username,),
-            ).fetchone()
+            row = db.execute("""
+                SELECT u.id, u.username, u.role, u.enabled, u.display_name, u.buyer_location,
+                       u.contact_hint, u.inquiry_signature
+                FROM auth_sessions s JOIN users u ON u.id = s.user_id
+                WHERE s.token_hash = ? AND s.expires_at > ? AND u.enabled = 1
+                  AND s.password_hash = u.password_hash
+                """, (digest, int(time.time()))).fetchone()
     except Exception:
         return None
-    if not row or not row["enabled"]:
-        return None
-    return dict(row)
+    return dict(row) if row else None
 
 
 def valid_credentials(username: str, password: str) -> bool:

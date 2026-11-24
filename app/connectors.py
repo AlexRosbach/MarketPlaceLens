@@ -4,6 +4,8 @@ import hashlib
 import ipaddress
 import json
 import re
+import socket
+import asyncio
 from dataclasses import dataclass
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
@@ -37,9 +39,11 @@ class MarketplaceConnector:
 
     def validate_search_url(self, url: str) -> None:
         parsed = urlparse(url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username is not None or parsed.password is not None:
             raise ValueError("Search URL must be an absolute http(s) URL.")
         validate_public_fetch_host(parsed.hostname or "")
+        if self.source_type == "kleinanzeigen" and parsed.hostname.lower() not in {"kleinanzeigen.de", "www.kleinanzeigen.de"}:
+            raise ValueError("Kleinanzeigen jobs need a Kleinanzeigen URL.")
         if self.source_type == "facebook":
             host = parsed.netloc.lower()
             path = parsed.path.rstrip("/").lower()
@@ -70,8 +74,34 @@ def validate_public_fetch_host(hostname: str) -> None:
         ip = ipaddress.ip_address(host)
     except ValueError:
         return
-    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved:
+    if not ip.is_global or ip.is_multicast:
         raise ValueError("Search URLs must not target local or private network hosts.")
+
+
+async def validate_public_request(request: httpx.Request) -> None:
+    """Validate every outbound request, including redirects, before connecting."""
+    url = request.url
+    host = url.host
+    try:
+        if url.scheme not in {"http", "https"} or not host or url.userinfo:
+            raise ValueError("Unsupported outbound URL")
+        validate_public_fetch_host(host)
+        records = await asyncio.wait_for(
+            asyncio.get_running_loop().getaddrinfo(host, url.port or (443 if url.scheme == "https" else 80),
+                                                   type=socket.SOCK_STREAM), timeout=5
+        )
+        if not records:
+            raise ValueError("No public address")
+        for record in records:
+            address = ipaddress.ip_address(record[4][0])
+            if not address.is_global or address.is_multicast:
+                raise ValueError("Non-public address")
+        if "cookie" in request.headers and (url.scheme != "https" or host.lower() not in
+                {"facebook.com", "www.facebook.com", "m.facebook.com"}):
+            # Never forward manually configured Facebook session credentials.
+            request.headers.pop("cookie", None)
+    except (ValueError, OSError, TimeoutError) as exc:
+        raise httpx.RequestError("Outbound URL is not permitted", request=request) from exc
 
 
 class HtmlListingConnector(MarketplaceConnector):
@@ -110,6 +140,9 @@ class HtmlListingConnector(MarketplaceConnector):
         async with httpx.AsyncClient(
             headers=request_headers,
             follow_redirects=True,
+            max_redirects=5,
+            trust_env=False,
+            event_hooks={"request": [validate_public_request]},
             timeout=20.0,
         ) as client:
             try:
@@ -277,7 +310,7 @@ class HtmlListingConnector(MarketplaceConnector):
         # while the old response shape is still encountered in cached pages.
         cards = [
             node
-            for node in soup.select("#srchrslt-adtable .ad-listitem, .aditem, #srchrslt-adtable article[data-adid]")
+            for node in soup.select("article[data-adid], .aditem, #srchrslt-adtable .ad-listitem")
             if isinstance(node, Tag)
         ]
         if not cards:
@@ -287,9 +320,9 @@ class HtmlListingConnector(MarketplaceConnector):
         seen: set[str] = set()
         for card in cards[:200]:
             candidate = self.normalize_kleinanzeigen_listing(card, profile["search_url"])
-            if not candidate or candidate.content_hash in seen:
+            if not candidate or candidate.source_listing_id in seen:
                 continue
-            seen.add(candidate.content_hash)
+            seen.add(candidate.source_listing_id)
             candidates.append(candidate)
         return candidates
 

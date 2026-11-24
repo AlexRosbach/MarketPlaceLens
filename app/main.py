@@ -7,6 +7,8 @@ import random
 import sqlite3
 import time
 import re
+import logging
+from collections import deque
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -17,9 +19,9 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from .auth import COOKIE_NAME, create_session, current_user_from_session, hash_password, valid_credentials
+from .auth import COOKIE_NAME, create_session, current_user_from_session, hash_password, valid_credentials, revoke_session
 from .config import settings
-from .connectors import ListingCandidate, facebook_browser_headers, get_connector, is_non_listing_artifact, parse_listing_availability, safe_cookie_header, validate_public_fetch_host
+from .connectors import ListingCandidate, facebook_browser_headers, get_connector, is_non_listing_artifact, parse_listing_availability, safe_cookie_header, validate_public_fetch_host, validate_public_request
 from .database import connect, encode_list, ensure_default_watchlist, init_db, row_to_listing, row_to_profile, utc_now
 from .filters import FilterResult, apply_filters
 from .notifier import TelegramNotifier, WebhookNotifier
@@ -31,6 +33,27 @@ static_dir = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 open_check_state = {"running": False, "last_started": 0.0}
 open_check_lock = asyncio.Lock()
+login_attempts: dict[str, deque] = {}
+login_lock = asyncio.Lock()
+logger = logging.getLogger(__name__)
+
+
+async def limit_login(request: Request) -> None:
+    # Use the ASGI peer address, not an arbitrary forwarded header.
+    now = time.monotonic()
+    peer = request.client.host if request.client else "unknown"
+    async with login_lock:
+        for key in list(login_attempts):
+            if not login_attempts[key] or now - login_attempts[key][-1] >= 300:
+                del login_attempts[key]
+        if peer not in login_attempts and len(login_attempts) >= 4096:
+            raise HTTPException(429, "Too many login attempts", headers={"Retry-After": "300"})
+        attempts = login_attempts.setdefault(peer, deque())
+        while attempts and now - attempts[0] >= 300:
+            attempts.popleft()
+        if len(attempts) >= 10:
+            raise HTTPException(429, "Too many login attempts", headers={"Retry-After": "300"})
+        attempts.append(now)
 
 
 @app.middleware("http")
@@ -92,6 +115,10 @@ async def setup(payload: SetupPayload) -> dict[str, bool]:
     if not username:
         raise HTTPException(400, "Username is required")
     with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        completed = db.execute("SELECT value FROM app_settings WHERE key = 'setup_complete'").fetchone()
+        if completed and completed["value"] == "1":
+            raise HTTPException(400, "Initial setup is already complete")
         row = db.execute("SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1").fetchone()
         if row:
             db.execute(
@@ -120,8 +147,10 @@ async def setup(payload: SetupPayload) -> dict[str, bool]:
 
 
 @app.post("/api/auth/login")
-async def login(payload: LoginPayload, response: Response) -> dict[str, bool]:
-    if not valid_credentials(payload.username, payload.password):
+async def login(payload: LoginPayload, response: Response, request: Request) -> dict[str, bool]:
+    await limit_login(request)
+    if payload.password == "admin" or not await asyncio.to_thread(valid_credentials, payload.username, payload.password):
+        logger.warning("Failed authentication attempt")
         raise HTTPException(401, "Invalid login")
     with connect() as db:
         db.execute("UPDATE users SET last_login_at = ? WHERE username = ?", (utc_now(), payload.username))
@@ -130,14 +159,16 @@ async def login(payload: LoginPayload, response: Response) -> dict[str, bool]:
         create_session(payload.username),
         httponly=True,
         samesite="lax",
+        secure=settings.cookie_secure or request.url.scheme == "https",
         max_age=60 * 60 * 24 * 14,
     )
     return {"ok": True}
 
 
 @app.post("/api/auth/logout")
-async def logout(response: Response) -> dict[str, bool]:
-    response.delete_cookie(COOKIE_NAME)
+async def logout(response: Response, request: Request) -> dict[str, bool]:
+    revoke_session(request.cookies.get(COOKIE_NAME))
+    response.delete_cookie(COOKIE_NAME, secure=settings.cookie_secure or request.url.scheme == "https", httponly=True, samesite="lax")
     return {"ok": True}
 
 
@@ -670,20 +701,29 @@ async def listing_image(listing_id: int, request: Request) -> Response:
     async with httpx.AsyncClient(
         headers={
             "User-Agent": settings.user_agent,
-            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            "Accept": "image/avif,image/webp,image/apng,image/png,image/jpeg,image/gif",
             "Referer": f"{parsed.scheme}://{parsed.netloc}/",
         },
         follow_redirects=True,
+        max_redirects=5,
+        trust_env=False,
+        event_hooks={"request": [validate_public_request]},
         timeout=20.0,
     ) as client:
-        response = await client.get(image_url)
-        response.raise_for_status()
-    content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
-    if not content_type.startswith("image/"):
-        raise HTTPException(502, "Remote URL did not return an image")
-    if len(response.content) > 5 * 1024 * 1024:
-        raise HTTPException(502, "Remote image is too large")
-    return Response(content=response.content, media_type=content_type)
+        try:
+            async with client.stream("GET", image_url) as response:
+                response.raise_for_status()
+                content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
+                if content_type not in {"image/jpeg", "image/png", "image/gif", "image/webp", "image/avif", "image/apng"}:
+                    raise HTTPException(502, "Unsupported remote image type")
+                data = bytearray()
+                async for chunk in response.aiter_bytes(chunk_size=65536):
+                    if len(data) + len(chunk) > 5 * 1024 * 1024:
+                        raise HTTPException(502, "Remote image is too large")
+                    data.extend(chunk)
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, "Remote image unavailable") from exc
+    return Response(content=bytes(data), media_type=content_type, headers={"X-Content-Type-Options": "nosniff"})
 
 
 @app.post("/api/listings/{listing_id}/inquiry")
@@ -1051,7 +1091,7 @@ async def verify_unseen_listing_availability(
     if profile["source_type"] == "facebook" and facebook_cookie:
         headers["Cookie"] = facebook_cookie
     updates: list[tuple[str, str, int]] = []
-    async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=12.0) as client:
+    async with httpx.AsyncClient(headers=headers, follow_redirects=True, max_redirects=5, trust_env=False, event_hooks={"request": [validate_public_request]}, timeout=12.0) as client:
         for row in rows:
             availability = "unknown"
             try:
@@ -1684,10 +1724,9 @@ async def generate_ai_text(app_settings: dict[str, str], messages: list[dict[str
             )
             response.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        detail = exc.response.text[:500] if exc.response is not None else str(exc)
-        raise HTTPException(502, f"AI provider request failed: {detail}") from exc
+        raise HTTPException(502, f"AI provider request failed (HTTP {exc.response.status_code})") from exc
     except httpx.HTTPError as exc:
-        raise HTTPException(502, f"AI provider is unreachable: {exc}") from exc
+        raise HTTPException(502, "AI provider is unreachable") from exc
     data = response.json()
     try:
         content = data["choices"][0]["message"]["content"]

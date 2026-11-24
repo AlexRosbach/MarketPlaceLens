@@ -107,6 +107,13 @@ def init_db() -> None:
               value TEXT NOT NULL DEFAULT ''
             );
 
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+              token_hash TEXT PRIMARY KEY,
+              user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              password_hash TEXT NOT NULL,
+              expires_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at);
             CREATE TABLE IF NOT EXISTS users (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               username TEXT NOT NULL UNIQUE,
@@ -264,10 +271,9 @@ def ensure_admin_user(db: sqlite3.Connection) -> None:
     row = db.execute("SELECT id FROM users WHERE role = 'admin' LIMIT 1").fetchone()
     if row:
         return
-    if not settings.admin_password:
+    if len(settings.admin_password) < 8 or settings.admin_password.lower() == "admin":
         return
-    stored_hash = db.execute("SELECT value FROM app_settings WHERE key = 'admin_password_hash'").fetchone()
-    password_hash = stored_hash["value"] if stored_hash and stored_hash["value"] else hash_password_for_bootstrap(settings.admin_password)
+    password_hash = hash_password_for_bootstrap(settings.admin_password)
     db.execute(
         """
         INSERT OR IGNORE INTO users(username, password_hash, role, enabled, created_at, updated_at)
