@@ -153,7 +153,7 @@ async def setup(payload: SetupPayload) -> dict[str, bool]:
 @app.post("/api/auth/login")
 async def login(payload: LoginPayload, response: Response, request: Request) -> dict[str, bool]:
     await limit_login(request)
-    if payload.password == "admin" or not await asyncio.to_thread(valid_credentials, payload.username, payload.password):
+    if payload.password.lower() == "admin" or not await asyncio.to_thread(valid_credentials, payload.username, payload.password):
         logger.warning("Failed authentication attempt")
         raise HTTPException(401, "Invalid login")
     with connect() as db:
@@ -225,9 +225,9 @@ def setup_required() -> bool:
         return False
     if not admin:
         return True
-    if setup_row and setup_row["value"] == "1":
-        return False
-    return valid_credentials(admin["username"], "admin")
+    # An existing administrator must use the authenticated password-change
+    # flow or container reset CLI; never reopen public setup for an existing account.
+    return False
 
 
 @app.get("/api/users")
@@ -730,7 +730,7 @@ async def listing_image(listing_id: int, request: Request) -> Response:
                     data.extend(chunk)
         except httpx.HTTPError as exc:
             raise HTTPException(502, "Remote image unavailable") from exc
-    return Response(content=bytes(data), media_type=content_type, headers={"X-Content-Type-Options": "nosniff"})
+    return Response(content=bytes(data), media_type=content_type, headers={"X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; sandbox"})
 
 
 @app.post("/api/listings/{listing_id}/inquiry")

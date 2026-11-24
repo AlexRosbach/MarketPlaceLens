@@ -2414,7 +2414,7 @@ async function reviewContactedCurrent() {
 
 function reviewOpenCurrent() {
   const listing = currentReviewListing();
-  if (listing?.listing_url) window.open(listing.listing_url, "_blank", "noopener");
+  if (listing?.listing_url) { const url = safeExternalUrl(listing.listing_url); if (url !== "#") window.open(url, "_blank", "noopener"); }
 }
 
 function reviewInquiryCurrent() {

@@ -66,7 +66,7 @@ Demo data, no real listings.
 - Optional AI buyer text, quick-job drafts, and listing assessments
 - Multi-user login with admin settings and user-owned jobs
 - German/English UI, dark/light mode, and mobile layouts
-- Defensive URL validation prevents saved jobs and image proxy requests from targeting local or private network hosts
+- Public marketplace and image fetches validate and pin public destination addresses; configure network egress restrictions as defense in depth.
 
 ## Quick Start
 
@@ -88,7 +88,7 @@ To reset an admin password from the container CLI:
 
 ```bash
 docker exec -it marketplacelens reset-password
-docker exec marketplacelens reset-password --username admin --password "MyNewPass123"
+docker exec -it marketplacelens reset-password --username admin
 ```
 
 ## Docker Images

@@ -31,7 +31,7 @@ def create_session(username: str) -> str:
 
 
 def revoke_session(value: str | None) -> None:
-    if value and len(value) <= 128:
+    if value and len(value) <= 128 and value.isascii():
         digest = hmac.new(settings.session_secret.encode(), value.encode(), sha256).hexdigest()
         with connect() as db:
             db.execute("DELETE FROM auth_sessions WHERE token_hash = ?", (digest,))
@@ -42,7 +42,7 @@ def valid_session(value: str | None) -> bool:
 
 
 def current_user_from_session(value: str | None) -> dict | None:
-    if not value or len(value) > 128:
+    if not value or len(value) > 128 or not value.isascii():
         return None
     digest = hmac.new(settings.session_secret.encode(), value.encode(), sha256).hexdigest()
     try:

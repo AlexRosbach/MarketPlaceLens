@@ -693,7 +693,8 @@ def first_text(card: Tag, selectors: list[str]) -> str:
 
 def is_kleinanzeigen_listing_url(url: str) -> bool:
     parsed = urlparse(urljoin("https://www.kleinanzeigen.de", url))
-    return "kleinanzeigen.de" in parsed.netloc.lower() and "/s-anzeige/" in parsed.path
+    return (parsed.scheme in {"http", "https"} and parsed.hostname in {"kleinanzeigen.de", "www.kleinanzeigen.de"}
+            and parsed.username is None and parsed.password is None and parsed.path.startswith("/s-anzeige/"))
 
 
 def is_marktplaats_listing_url(url: str) -> bool:
