@@ -246,7 +246,6 @@ class HtmlListingConnector(MarketplaceConnector):
         current_url = first_url
         for _ in range(12):
             page_candidates = self.parse_kleinanzeigen_listings(html, profile)
-            await self.fill_missing_kleinanzeigen_posted_dates(client, page_candidates)
             for candidate in page_candidates:
                 if candidate.content_hash in seen:
                     continue
@@ -260,7 +259,9 @@ class HtmlListingConnector(MarketplaceConnector):
             response.raise_for_status()
             html = response.text
             current_url = str(response.url)
-        return candidates[:500]
+        candidates = candidates[:500]
+        await self.fill_missing_kleinanzeigen_posted_dates(client, candidates)
+        return candidates
 
     async def fill_missing_kleinanzeigen_posted_dates(
         self,
@@ -268,7 +269,7 @@ class HtmlListingConnector(MarketplaceConnector):
         candidates: list[ListingCandidate],
     ) -> None:
         missing = [candidate for candidate in candidates if not candidate.posted_at_text]
-        for candidate in missing[:24]:
+        for candidate in missing[:12]:
             try:
                 response = await client.get(candidate.listing_url)
                 response.raise_for_status()
@@ -886,10 +887,17 @@ def parse_price(value: str) -> float | None:
     lowered = value.lower()
     if "kostenlos" in lowered or "free" in lowered or "zu verschenken" in lowered:
         return 0.0
-    match = re.search(r"(\d+(?:[.,]\d{1,2})?)", lowered.replace(".", ""))
+    match = re.search(r"\d+(?:[.,\s]\d+)*", lowered)
     if not match:
         return None
-    return float(match.group(1).replace(",", "."))
+    number = re.sub(r"\s+", "", match.group())
+    # The last separator denotes cents only when followed by one or two digits.
+    decimal = re.search(r"[.,](\d{1,2})$", number)
+    if decimal:
+        number = re.sub(r"[.,]", "", number[:decimal.start()]) + "." + decimal.group(1)
+    else:
+        number = re.sub(r"[.,]", "", number)
+    return float(number)
 
 
 def extract_mobilede_initial_state(html: str) -> dict:

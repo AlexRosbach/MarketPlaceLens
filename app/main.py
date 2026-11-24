@@ -629,7 +629,7 @@ async def list_listings(
             {where}
             """,
             values,
-        ).fetchone()["count"]
+        ).fetchone()["count"] if paged else None
         rows = db.execute(
             f"""
             SELECT listings.*, watch_profiles.name profile_name
@@ -688,6 +688,15 @@ async def update_listing_status(listing_id: int, payload: ListingStatusPayload, 
     if not row:
         raise HTTPException(404, "Listing not found")
     return attach_watchlists([row_to_listing(row)])[0]
+
+
+@app.get("/api/listings/{listing_id}/price-history")
+async def listing_price_history(listing_id: int, request: Request) -> list[dict[str, Any]]:
+    user = request_user(request)
+    with connect() as db:
+        if not can_access_listing(db, listing_id, user):
+            raise HTTPException(404, "Listing not found")
+        return [dict(row) for row in db.execute("SELECT price_value, observed_at FROM listing_price_history WHERE listing_id = ? ORDER BY observed_at DESC, id DESC LIMIT 100", (listing_id,)).fetchall()]
 
 
 @app.get("/api/listings/{listing_id}/image")
@@ -966,7 +975,30 @@ async def test_webhook(request: Request) -> dict[str, bool]:
     return {"ok": True}
 
 
+active_profile_runs: set[int] = set()
+marketplace_run_lock = asyncio.Lock()
+last_marketplace_run = 0.0
+
+
 async def run_profile(profile_id: int) -> dict[str, Any]:
+    global last_marketplace_run
+    if profile_id in active_profile_runs:
+        return {"profile_id": profile_id, "skipped": True, "reason": "already_running"}
+    active_profile_runs.add(profile_id)
+    try:
+        async with marketplace_run_lock:
+            delay = get_global_rate_limit() - (time.monotonic() - last_marketplace_run)
+            if delay > 0:
+                await asyncio.sleep(delay)
+            try:
+                return await _run_profile(profile_id)
+            finally:
+                last_marketplace_run = time.monotonic()
+    finally:
+        active_profile_runs.discard(profile_id)
+
+
+async def _run_profile(profile_id: int) -> dict[str, Any]:
     started_at = utc_now()
     with connect() as db:
         row = db.execute("SELECT * FROM watch_profiles WHERE id = ?", (profile_id,)).fetchone()
@@ -988,9 +1020,10 @@ async def run_profile(profile_id: int) -> dict[str, Any]:
                 "error",
                 {"fetched": 0, "new": 0, "hidden": 0, "duplicates": 0, "notified": 0},
                 started_at,
-                str(exc),
+                type(exc).__name__,
             )
-        raise HTTPException(502, f"Connector failed: {exc}") from exc
+            db.execute("UPDATE watch_profiles SET last_run_at = ? WHERE id = ?", (utc_now(), profile_id))
+        raise HTTPException(502, "Marketplace connector failed") from exc
 
     notifier = TelegramNotifier(app_settings.get("telegram_bot_token", ""), app_settings.get("telegram_chat_id", ""))
     webhook = WebhookNotifier(app_settings.get("webhook_url", ""))
@@ -1005,6 +1038,12 @@ async def run_profile(profile_id: int) -> dict[str, Any]:
             if existing:
                 updates = ["last_seen_at = ?", "availability_status = ?", "availability_checked_at = ?"]
                 values: list[Any] = [now, "active", now]
+                if candidate.price_value is not None and existing["price_value"] != candidate.price_value:
+                    if existing["price_value"] is not None and not db.execute("SELECT 1 FROM listing_price_history WHERE listing_id = ? LIMIT 1", (existing["id"],)).fetchone():
+                        db.execute("INSERT INTO listing_price_history(listing_id, price_value, observed_at) VALUES (?, ?, ?)", (existing["id"], existing["price_value"], existing["last_seen_at"]))
+                    db.execute("INSERT INTO listing_price_history(listing_id, price_value, observed_at) VALUES (?, ?, ?)", (existing["id"], candidate.price_value, now))
+                    updates.extend(["ai_assessment_text = ?", "ai_assessed_at = ?"])
+                    values.extend(["", None])
                 refresh_existing_listing_fields(existing, candidate, updates, values)
                 if not bool(existing["user_hidden"]):
                     result = apply_filters(candidate, profile)
@@ -1022,6 +1061,8 @@ async def run_profile(profile_id: int) -> dict[str, Any]:
             result = apply_listing_age_limit(candidate, profile, result)
             status = result.status
             listing_id = insert_listing(db, profile["id"], candidate, status, result.score, result.reason, now)
+            if candidate.price_value is not None:
+                db.execute("INSERT INTO listing_price_history(listing_id, price_value, observed_at) VALUES (?, ?, ?)", (listing_id, candidate.price_value, now))
             listing = db.execute("SELECT * FROM listings WHERE id = ?", (listing_id,)).fetchone()
             if status == "hidden":
                 stats["hidden"] += 1
@@ -1078,9 +1119,12 @@ async def verify_unseen_listing_availability(
             WHERE profile_id = ?
               AND user_hidden = 0
               AND status IN ('new', 'notified')
-            ORDER BY first_seen_at DESC
+              AND last_seen_at < ?
+              AND (availability_checked_at IS NULL OR datetime(availability_checked_at) <= datetime(?, '-6 hours'))
+            ORDER BY availability_checked_at ASC, first_seen_at DESC
+            LIMIT 20
             """,
-            (profile["id"],),
+            (profile["id"], now, now),
         ).fetchall()
     if not rows:
         return stats
@@ -1112,6 +1156,12 @@ async def verify_unseen_listing_availability(
                 )
             except httpx.HTTPError:
                 availability = "unknown"
+            if availability == "unknown":
+                # Transient failures do not overwrite a previously known state.
+                with connect() as db:
+                    db.execute("UPDATE listings SET availability_checked_at = ? WHERE id = ?", (now, row["id"]))
+                stats["availability_checked"] += 1
+                continue
             updates.append((availability, now, row["id"]))
             stats["availability_checked"] += 1
             if availability == "deleted":
@@ -1132,8 +1182,11 @@ async def poll_loop() -> None:
         try:
             due_profiles = get_due_profiles()
             for profile in due_profiles:
-                await run_profile(profile["id"])
-                await asyncio.sleep(max(get_global_rate_limit(), random.randint(8, 18)))
+                try:
+                    await run_profile(profile["id"])
+                except Exception:
+                    logger.warning("Scheduled marketplace job failed (profile %s)", profile["id"])
+                await asyncio.sleep(1)
         except Exception:
             pass
         await asyncio.sleep(60)
@@ -1814,10 +1867,10 @@ def refresh_existing_listing_fields(
         ("thumbnail_url", candidate.thumbnail_url),
     ]
     for field, value in fill_fields:
-        if value and not existing[field]:
+        if value and (not existing[field] or (field == "price_text" and candidate.price_value is not None and value != existing[field])):
             updates.append(f"{field} = ?")
             values.append(value)
-    if candidate.price_value is not None and existing["price_value"] is None:
+    if candidate.price_value is not None and existing["price_value"] != candidate.price_value:
         updates.append("price_value = ?")
         values.append(candidate.price_value)
     if candidate.content_hash and candidate.content_hash != existing["content_hash"]:

@@ -47,6 +47,7 @@ def connect() -> Iterator[sqlite3.Connection]:
 
 def init_db() -> None:
     with connect() as db:
+        db.execute("PRAGMA journal_mode = WAL")
         db.executescript(
             """
             CREATE TABLE IF NOT EXISTS watch_profiles (
@@ -193,6 +194,18 @@ def init_db() -> None:
               )
             """
         )
+        db.executescript("""
+            CREATE INDEX IF NOT EXISTS idx_listings_profile_status_checked ON listings(profile_id, status, availability_checked_at);
+            CREATE INDEX IF NOT EXISTS idx_listings_first_seen ON listings(first_seen_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_profiles_enabled_run ON watch_profiles(enabled, last_run_at);
+            CREATE INDEX IF NOT EXISTS idx_profiles_owner ON watch_profiles(user_id);
+            CREATE INDEX IF NOT EXISTS idx_run_logs_profile_finished ON run_logs(profile_id, finished_at DESC);
+            CREATE TABLE IF NOT EXISTS listing_price_history (
+                id INTEGER PRIMARY KEY, listing_id INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+                price_value REAL NOT NULL, observed_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_price_history_listing ON listing_price_history(listing_id, observed_at DESC);
+        """)
         ensure_admin_user(db)
         assign_unowned_profiles_to_admin(db)
         default_watchlist_id = ensure_default_watchlist(db)
