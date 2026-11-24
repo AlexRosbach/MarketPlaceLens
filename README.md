@@ -120,3 +120,7 @@ MarketPlaceLens is intended for private self-hosted use with marketplace URLs yo
 ## License
 
 MIT License, see [LICENSE](LICENSE).
+
+
+### New-price comparison (experimental)
+Open **New-price comparison & price history** on a listing or review card. Configure `MARKETPLACELENS_EBAY_CLIENT_ID` and `MARKETPLACELENS_EBAY_CLIENT_SECRET` in your local environment for the official eBay Browse API (production access required). Results are possible matches, not guaranteed identical products; compare condition, model and shipping. Without credentials the UI shows search links only. Amazon prices are not retrieved until an approved provider and usage rights for this price-comparison application are available. No Amazon scraping or invented prices. eBay responses are cached in memory for 15 minutes.

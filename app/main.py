@@ -27,6 +27,7 @@ from .filters import FilterResult, apply_filters
 from .notifier import TelegramNotifier, WebhookNotifier
 from .schemas import AccountProfilePayload, InquiryPayload, ListingStatusPayload, LoginPayload, PasswordPayload, ProfilePayload, SearchDraftPayload, SettingsPayload, SetupPayload, UserPayload, UserUpdatePayload, WatchlistPayload
 from .version import APP_VERSION, version_payload
+from .price_comparison import compare_new_prices
 
 app = FastAPI(title="MarketPlaceLens", version=APP_VERSION)
 static_dir = Path(__file__).parent / "static"
@@ -688,6 +689,16 @@ async def update_listing_status(listing_id: int, payload: ListingStatusPayload, 
     if not row:
         raise HTTPException(404, "Listing not found")
     return attach_watchlists([row_to_listing(row)])[0]
+
+
+@app.get("/api/listings/{listing_id}/new-price-comparison")
+async def listing_new_price_comparison(listing_id: int, request: Request) -> dict[str, Any]:
+    user = request_user(request)
+    with connect() as db:
+        if not can_access_listing(db, listing_id, user):
+            raise HTTPException(404, "Listing not found")
+        row = db.execute("SELECT title FROM listings WHERE id = ?", (listing_id,)).fetchone()
+    return await compare_new_prices(row["title"])
 
 
 @app.get("/api/listings/{listing_id}/price-history")

@@ -2284,6 +2284,37 @@ function renderReviewCard() {
   });
 }
 
+function priceToolsMarkup(listing) {
+  const de = state.language === "de";
+  return `<details class="price-tools" data-price-tools data-listing-id="${listing.id}">
+    <summary>${de ? "Neupreisvergleich & Preisverlauf" : "New-price comparison & price history"}</summary>
+    <div data-price-content class="meta"></div>
+  </details>`;
+}
+
+document.addEventListener("toggle", async (event) => {
+  const panel = event.target;
+  if (!(panel instanceof HTMLDetailsElement) || !panel.matches("[data-price-tools]") || !panel.open || panel.dataset.loaded) return;
+  panel.dataset.loaded = "1";
+  const content = panel.querySelector("[data-price-content]");
+  const de = state.language === "de";
+  content.textContent = de ? "Lade Preise …" : "Loading prices …";
+  try {
+    const id = Number(panel.dataset.listingId);
+    const [comparison, history] = await Promise.all([
+      api(`/api/listings/${id}/new-price-comparison`), api(`/api/listings/${id}/price-history`)
+    ]);
+    const money = (value) => new Intl.NumberFormat(de ? "de-DE" : "en-GB", {style:"currency",currency:"EUR"}).format(value);
+    const offers = comparison.offers.map(offer => `<p><a href="${escapeAttribute(safeExternalUrl(offer.url))}" target="_blank" rel="noopener noreferrer">${escapeHtml(offer.provider)}: ${escapeHtml(money(offer.price))}</a> · ${escapeHtml(offer.title)} · ${de ? "Ähnlicher Treffer" : "Possible match"} (${Math.round(offer.match_confidence * 100)}%) · ${offer.shipping === null ? (de ? "Versand unbekannt" : "Shipping unknown") : escapeHtml(money(offer.shipping))}</p>`).join("");
+    const links = Object.entries(comparison.links).map(([name, url]) => `<a href="${escapeAttribute(safeExternalUrl(url))}" target="_blank" rel="noopener noreferrer">${escapeHtml(name === "amazon" ? "Amazon" : "eBay")} ${de ? "Suche" : "search"}</a>`).join(" · ");
+    const historyHtml = history.slice(0, 10).map(entry => `<li>${escapeHtml(money(entry.price_value))} · ${escapeHtml(entry.observed_at)}</li>`).join("");
+    content.innerHTML = `${offers || (de ? "Keine verifizierten Neupreise verfügbar." : "No verified new-item prices available.")}<p>${links}</p>${comparison.fetched_at ? `<p>${escapeHtml(comparison.fetched_at)}</p>` : ""}<p>${de ? "Amazon: derzeit nur Suchlink. Bitte Variante und Zustand prüfen." : "Amazon: search link only. Verify model, variant and condition."}</p><ul>${historyHtml}</ul>`;
+  } catch {
+    content.textContent = de ? "Preisvergleich nicht verfügbar. Erneut öffnen zum Wiederholen." : "Price comparison unavailable. Reopen to retry.";
+    delete panel.dataset.loaded;
+  }
+}, true);
+
 function reviewListingMarkup(listing) {
   const watchlistBadges = listing.watchlists?.length
     ? listing.watchlists.map((watchlist) => `<span class="pill watchlist-pill">${escapeHtml(watchlist.name)}</span>`).join("")
@@ -2308,6 +2339,7 @@ function reviewListingMarkup(listing) {
         <h3>${escapeHtml(listing.title)}</h3>
         ${listing.description_snippet ? `<p class="review-description">${escapeHtml(listing.description_snippet)}</p>` : ""}
         <strong class="review-price">${escapeHtml(listing.price_text || t("listing.noPrice"))}</strong>
+        ${priceToolsMarkup(listing)}
         <div class="listing-facts">
           ${factsMarkup(detailFacts, listing)}
         </div>
@@ -2910,6 +2942,7 @@ function listingMarkup(listing, index = 0) {
           </div>
         </div>
         <strong class="listing-price">${escapeHtml(listing.price_text || t("listing.noPrice"))}</strong>
+        ${priceToolsMarkup(listing)}
         <p class="meta listing-description">${escapeHtml(listing.description_snippet || "")}</p>
         <div class="listing-facts">
           ${factsMarkup(detailFacts, listing)}

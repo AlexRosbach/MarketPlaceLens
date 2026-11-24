@@ -3371,3 +3371,7 @@ textarea.chip-source {
     transform: none !important;
   }
 }
+
+.price-tools { margin: .6rem 0; padding: .5rem; border: 1px solid currentColor; border-radius: .5rem; }
+.price-tools summary { cursor: pointer; font-weight: 600; }
+.price-tools p { overflow-wrap: anywhere; }
