@@ -20,6 +20,15 @@ jobs:
           MARKETPLACELENS_POLL_ENABLED: 'false'
       - run: node --check app/static/app.js
       - run: docker build -t marketplacelens-ci .
+  mcp-companion:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements-mcp.txt pytest
+      - run: pytest -q tests/test_mcp_companion.py
   dependencies:
     runs-on: ubuntu-latest
     steps:

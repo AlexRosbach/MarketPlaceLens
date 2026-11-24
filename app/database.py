@@ -173,6 +173,8 @@ def init_db() -> None:
         ensure_column(db, "watch_profiles", "notify_webhook", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(db, "watch_profiles", "user_id", "INTEGER REFERENCES users(id)")
         ensure_column(db, "watch_profiles", "max_listing_age_days", "INTEGER NOT NULL DEFAULT 365")
+        ensure_column(db, "watch_profiles", "consecutive_failures", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(db, "watch_profiles", "retry_after", "TEXT")
         ensure_column(db, "users", "display_name", "TEXT NOT NULL DEFAULT ''")
         ensure_column(db, "users", "buyer_location", "TEXT NOT NULL DEFAULT ''")
         ensure_column(db, "users", "contact_hint", "TEXT NOT NULL DEFAULT ''")

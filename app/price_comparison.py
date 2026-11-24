@@ -9,7 +9,7 @@ import asyncio
 import os
 import re
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from datetime import UTC, datetime
 from urllib.parse import urlencode, urlparse
 
@@ -21,6 +21,8 @@ _token: tuple[float, str] = (0, "")
 _amazon_token: tuple[float, str] = (0, "")
 TTL = 900
 MAX_CACHE = 512
+_request_times = deque()
+MAX_COMPARISONS_PER_HOUR = 30
 
 
 def product_query(title: str) -> str:
@@ -156,6 +158,13 @@ async def compare_new_prices(title: str, refresh: bool = False) -> dict:
         if cached and now - cached[0] < TTL:
             _cache.move_to_end(query)
             return cached[1]
+        while _request_times and now - _request_times[0] >= 3600:
+            _request_times.popleft()
+        if len(_request_times) >= MAX_COMPARISONS_PER_HOUR:
+            result["ebay_status"] = "rate_limited" if client_id and secret else "not_configured"
+            result["amazon_status"] = "rate_limited" if amazon_enabled else "search_link_only"
+            return result
+        _request_times.append(now)
         try:
             if not client_id or not secret:
                 raise ValueError("eBay is not configured")

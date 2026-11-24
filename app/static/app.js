@@ -1030,6 +1030,8 @@ function showView(view) {
   }[view]);
   if (view === "listings") loadListings();
   if (view === "watchlist") loadWatchlist();
+  if (view === "review") loadReviewQueue();
+  if (view === "settings") Promise.all([loadSettings(), loadAccountProfile(), loadUsers()]).catch(error => toast(errorMessage(error)));
 }
 
 function showWizard(visible) {
@@ -1106,7 +1108,11 @@ function validateWizardStep(step) {
 async function refreshAll() {
   try {
     await loadAuthStatus();
-    await Promise.all([loadVersion(), loadSummary(), loadProfiles(), loadListings(), loadWatchlist(), loadReviewQueue(), loadSettings(), loadAccountProfile(), loadUsers()]);
+    await Promise.all([loadVersion(), loadSummary(), loadProfiles(), loadSettings()]);
+    if (state.currentView === "listings") await loadListings();
+    if (state.currentView === "watchlist") await loadWatchlist();
+    if (state.currentView === "review") await loadReviewQueue();
+    if (state.currentView === "settings") await Promise.all([loadAccountProfile(), loadUsers()]);
   } catch (error) {
     if (String(error.message).includes("Not authenticated") || String(error.message).includes("401")) {
       window.location.href = "/login";
@@ -2288,7 +2294,7 @@ function renderReviewCard() {
 
 function priceToolsMarkup(listing) {
   const de = state.language === "de";
-  return `<details class="price-tools" data-price-tools data-listing-id="${listing.id}">
+  return `<details class="price-tools" data-price-tools data-listing-id="${listing.id}" data-listing-price="${escapeAttribute(listing.price_value ?? "")}">
     <summary>${de ? "Neupreisvergleich & Preisverlauf" : "New-price comparison & price history"}</summary>
     <div data-price-content class="meta"></div>
     <label class="meta">${de ? "Wunschpreis (€)" : "Target price (€)"} <input type="number" min="0" step="0.01" data-target-price value="${escapeAttribute(listing.target_price ?? "")}"></label>
@@ -2320,7 +2326,9 @@ document.addEventListener("toggle", async (event) => {
       api(`/api/listings/${id}/new-price-comparison`), api(`/api/listings/${id}/price-history`), api(`/api/listings/${id}/possible-duplicates`)
     ]);
     const money = (value) => new Intl.NumberFormat(de ? "de-DE" : "en-GB", {style:"currency",currency:"EUR"}).format(value);
-    const offers = comparison.offers.map(offer => `<p><a href="${escapeAttribute(safeExternalUrl(offer.url))}" target="_blank" rel="noopener noreferrer">${escapeHtml(offer.provider)} (${offer.condition === "used" ? (de ? "gebraucht" : "used") : (de ? "neu" : "new")}): ${escapeHtml(money(offer.price))}</a> · ${escapeHtml(offer.title)} · ${de ? "Ähnlicher Treffer" : "Possible match"} (${Math.round(offer.match_confidence * 100)}%) · ${offer.shipping === null ? (de ? "Versand unbekannt" : "Shipping unknown") : escapeHtml(money(offer.shipping))}</p>`).join("");
+    const localPrice = panel.dataset.listingPrice === "" ? null : Number(panel.dataset.listingPrice);
+    const difference = offer => offer.condition === "new" && offer.match_confidence >= 0.9 && Number.isFinite(localPrice) && localPrice !== null && offer.price > 0 ? ` · ${de ? "Preisabstand vor Versand" : "Price difference before shipping"}: ${escapeHtml(money(offer.price - localPrice))} (${Math.round((offer.price-localPrice)/offer.price*100)}%)` : "";
+    const offers = comparison.offers.map(offer => `<p><a href="${escapeAttribute(safeExternalUrl(offer.url))}" target="_blank" rel="noopener noreferrer">${escapeHtml(offer.provider)} (${offer.condition === "used" ? (de ? "gebraucht" : "used") : (de ? "neu" : "new")}): ${escapeHtml(money(offer.price))}</a> · ${escapeHtml(offer.title)} · ${de ? "Ähnlicher Treffer" : "Possible match"} (${Math.round(offer.match_confidence * 100)}%) · ${offer.shipping === null ? (de ? "Versand unbekannt" : "Shipping unknown") : escapeHtml(money(offer.shipping))}${difference(offer)}</p>`).join("");
     const links = Object.entries(comparison.links).map(([name, url]) => `<a href="${escapeAttribute(safeExternalUrl(url))}" target="_blank" rel="noopener noreferrer">${escapeHtml(name === "amazon" ? "Amazon" : "eBay")} ${de ? "Suche" : "search"}</a>`).join(" · ");
     const duplicatesHtml = duplicates.map(item => `<li><a href="${escapeAttribute(safeExternalUrl(item.listing_url))}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.title)}</a> · ${escapeHtml(item.source_type)} · ${Math.round(item.confidence*100)}%</li>`).join("");
     const historyHtml = history.slice(0, 10).map(entry => `<li>${escapeHtml(money(entry.price_value))} · ${escapeHtml(entry.observed_at)}</li>`).join("");

@@ -138,3 +138,5 @@ Use `docker exec marketplacelens python -m app.cli.housekeeping backup /data/bac
 
 ### Optional local MCP companion
 Install `requirements-mcp.txt` into a separate Python environment. Run `python -m app.mcp_companion` via a local MCP client using stdio, setting `MARKETPLACELENS_DB_PATH` to the local SQLite database and `MARKETPLACELENS_MCP_USER_ID` to an explicitly chosen enabled user's numeric ID. The connection is read-only and every tool is scoped to that user, including when the chosen user is an admin. No remote HTTP transport or remote authentication is provided; protect the database and local process environment with OS permissions. Tools: list jobs, search listings/watchlisted items and read price history. Never expose the database mount publicly.
+
+Provider comparisons are loaded on demand and limited to 30 uncached queries per hour per process. A price difference before shipping is shown only for a high-overlap candidate, not a verified product identity. Failed polling jobs back off up to six hours. Listing, review and watchlist data are loaded when their respective view is opened.

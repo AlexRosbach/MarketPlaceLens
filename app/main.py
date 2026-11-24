@@ -1089,6 +1089,12 @@ async def _run_profile(profile_id: int) -> dict[str, Any]:
     if not row:
         raise HTTPException(404, "Profile not found")
     profile = row_to_profile(row)
+    if profile.get("retry_after"):
+        try:
+            if datetime.fromisoformat(profile["retry_after"]) > datetime.now(UTC):
+                return {"profile_id": profile_id, "skipped": True, "reason": "retry_backoff", "retry_after": profile["retry_after"]}
+        except ValueError:
+            pass
     app_settings = {item["key"]: item["value"] for item in settings_rows}
     if profile["source_type"] == "facebook":
         profile["facebook_cookie_header"] = app_settings.get("facebook_cookie_header", "")
@@ -1109,7 +1115,9 @@ async def _run_profile(profile_id: int) -> dict[str, Any]:
                 started_at,
                 type(exc).__name__,
             )
-            db.execute("UPDATE watch_profiles SET last_run_at = ? WHERE id = ?", (utc_now(), profile_id))
+            failures = min(10, int(profile.get("consecutive_failures") or 0) + 1)
+            retry_after = (datetime.now(UTC) + timedelta(minutes=min(360, max(5, int(profile["poll_interval_minutes"])) * (2 ** (failures - 1))))).isoformat()
+            db.execute("UPDATE watch_profiles SET last_run_at = ?, consecutive_failures = ?, retry_after = ? WHERE id = ?", (utc_now(), failures, retry_after, profile_id))
         raise HTTPException(502, "Marketplace connector failed") from exc
 
     stats = {"fetched": len(candidates), "new": 0, "hidden": 0, "duplicates": 0, "notified": 0}
@@ -1171,7 +1179,7 @@ async def _run_profile(profile_id: int) -> dict[str, Any]:
                 except HTTPException:
                     pass
             enqueue(db, profile, listing_id, app_settings, result.matched_reason)
-        db.execute("UPDATE watch_profiles SET last_run_at = ?, updated_at = ? WHERE id = ?", (now, now, profile_id))
+        db.execute("UPDATE watch_profiles SET last_run_at = ?, updated_at = ?, consecutive_failures = 0, retry_after = NULL WHERE id = ?", (now, now, profile_id))
     stats.update(await verify_unseen_listing_availability(profile, app_settings, now))
     with connect() as db:
         record_run(db, profile, "success", stats, started_at, "")
@@ -1271,6 +1279,7 @@ def get_due_profiles() -> list[dict[str, Any]]:
             """
             SELECT * FROM watch_profiles
             WHERE enabled = 1
+              AND (retry_after IS NULL OR datetime(retry_after) <= datetime('now'))
               AND (
                 last_run_at IS NULL OR
                 datetime(last_run_at) <= datetime('now', '-' || poll_interval_minutes || ' minutes')
