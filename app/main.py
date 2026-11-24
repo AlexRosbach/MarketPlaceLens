@@ -28,6 +28,11 @@ from .notifier import TelegramNotifier, WebhookNotifier
 from .schemas import AccountProfilePayload, InquiryPayload, ListingStatusPayload, LoginPayload, PasswordPayload, ProfilePayload, SearchDraftPayload, SettingsPayload, SetupPayload, UserPayload, UserUpdatePayload, WatchlistPayload
 from .version import APP_VERSION, version_payload
 from .price_comparison import compare_new_prices
+from .efficiency import BoundedCache, search_key, assessment_key
+from .delivery import enqueue, delivery_loop
+
+search_cache = BoundedCache(120, 64)
+thumbnail_cache = BoundedCache(600, 256, 32 * 1024 * 1024)
 
 app = FastAPI(title="MarketPlaceLens", version=APP_VERSION)
 static_dir = Path(__file__).parent / "static"
@@ -81,6 +86,7 @@ async def require_session(request: Request, call_next):
 @app.on_event("startup")
 async def startup() -> None:
     init_db()
+    asyncio.create_task(delivery_loop())
     if settings.poll_enabled:
         asyncio.create_task(poll_loop())
 
@@ -691,6 +697,24 @@ async def update_listing_status(listing_id: int, payload: ListingStatusPayload, 
     return attach_watchlists([row_to_listing(row)])[0]
 
 
+@app.put("/api/listings/{listing_id}/target-price")
+async def set_target_price(listing_id: int, request: Request) -> dict[str, Any]:
+    user = request_user(request)
+    payload = await request.json()
+    raw = payload.get("target_price")
+    try:
+        target = None if raw is None else float(raw)
+        if target is not None and not 0 <= target <= 100000000:
+            raise ValueError()
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Invalid target price")
+    with connect() as db:
+        if not can_access_listing(db, listing_id, user):
+            raise HTTPException(404, "Listing not found")
+        db.execute("UPDATE listings SET target_price = ? WHERE id = ?", (target, listing_id))
+    return {"target_price": target}
+
+
 @app.get("/api/listings/{listing_id}/new-price-comparison")
 async def listing_new_price_comparison(listing_id: int, request: Request) -> dict[str, Any]:
     user = request_user(request)
@@ -699,6 +723,18 @@ async def listing_new_price_comparison(listing_id: int, request: Request) -> dic
             raise HTTPException(404, "Listing not found")
         row = db.execute("SELECT title FROM listings WHERE id = ?", (listing_id,)).fetchone()
     return await compare_new_prices(row["title"])
+
+
+@app.get("/api/connector-health")
+async def connector_health(request: Request) -> list[dict[str, Any]]:
+    require_admin(request)
+    with connect() as db:
+        return [dict(row) for row in db.execute("""SELECT p.source_type, COUNT(*) AS runs,
+            SUM(r.status = 'success') AS successful, SUM(r.status = 'error') AS failed,
+            MAX(CASE WHEN r.status = 'success' THEN r.finished_at END) AS last_success,
+            ROUND(AVG((julianday(r.finished_at) - julianday(r.started_at)) * 86400), 2) AS average_seconds
+            FROM run_logs r JOIN watch_profiles p ON p.id = r.profile_id
+            GROUP BY p.source_type""").fetchall()]
 
 
 @app.get("/api/listings/{listing_id}/price-history")
@@ -723,6 +759,10 @@ async def listing_image(listing_id: int, request: Request) -> Response:
     if not image_url:
         raise HTTPException(404, "Listing has no image")
     validate_remote_image_url(image_url)
+    cached = thumbnail_cache.get(image_url)
+    if cached:
+        data, content_type = cached
+        return Response(content=data, media_type=content_type, headers={"Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; sandbox"})
     parsed = urlparse(image_url)
     async with httpx.AsyncClient(
         headers={
@@ -750,7 +790,8 @@ async def listing_image(listing_id: int, request: Request) -> Response:
                     data.extend(chunk)
         except httpx.HTTPError as exc:
             raise HTTPException(502, "Remote image unavailable") from exc
-    return Response(content=bytes(data), media_type=content_type, headers={"X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; sandbox"})
+    thumbnail_cache.put(image_url, (bytes(data), content_type), len(data))
+    return Response(content=bytes(data), media_type=content_type, headers={"Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; sandbox"})
 
 
 @app.post("/api/listings/{listing_id}/inquiry")
@@ -809,13 +850,17 @@ async def generate_listing_assessment(listing_id: int, request: Request) -> dict
     if app_settings.get("ai_listing_assessments_enabled") != "1":
         raise HTTPException(400, "AI listing assessments are not enabled")
     listing = row_to_listing(listing_row)
-    text = await generate_ai_text(app_settings, listing_assessment_prompt(listing), max_tokens=180)
+    messages = listing_assessment_prompt(listing)
+    key = assessment_key(app_settings, messages)
+    if listing.get("ai_assessment_key") == key and listing.get("ai_assessment_text"):
+        return {"text": listing["ai_assessment_text"], "assessed_at": listing["ai_assessed_at"]}
+    text = await generate_ai_text(app_settings, messages, max_tokens=180)
     assessed_at = utc_now()
     cleaned = text.strip()
     with connect() as db:
         db.execute(
-            "UPDATE listings SET ai_assessment_text = ?, ai_assessed_at = ? WHERE id = ?",
-            (cleaned, assessed_at, listing_id),
+            "UPDATE listings SET ai_assessment_text = ?, ai_assessed_at = ?, ai_assessment_key = ? WHERE id = ?",
+            (cleaned, assessed_at, key, listing_id),
         )
     return {"text": cleaned, "assessed_at": assessed_at}
 
@@ -1022,7 +1067,11 @@ async def _run_profile(profile_id: int) -> dict[str, Any]:
         profile["facebook_cookie_header"] = app_settings.get("facebook_cookie_header", "")
     connector = get_connector(profile["source_type"])
     try:
-        candidates = await connector.fetch_listings(profile)
+        key = search_key(profile)
+        candidates = search_cache.get(key)
+        if candidates is None:
+            candidates = await connector.fetch_listings(profile)
+            search_cache.put(key, candidates)
     except Exception as exc:  # Manual runs should surface connector failures directly.
         with connect() as db:
             record_run(
@@ -1036,8 +1085,6 @@ async def _run_profile(profile_id: int) -> dict[str, Any]:
             db.execute("UPDATE watch_profiles SET last_run_at = ? WHERE id = ?", (utc_now(), profile_id))
         raise HTTPException(502, "Marketplace connector failed") from exc
 
-    notifier = TelegramNotifier(app_settings.get("telegram_bot_token", ""), app_settings.get("telegram_chat_id", ""))
-    webhook = WebhookNotifier(app_settings.get("webhook_url", ""))
     stats = {"fetched": len(candidates), "new": 0, "hidden": 0, "duplicates": 0, "notified": 0}
     now = utc_now()
     with connect() as db:
@@ -1055,6 +1102,9 @@ async def _run_profile(profile_id: int) -> dict[str, Any]:
                     db.execute("INSERT INTO listing_price_history(listing_id, price_value, observed_at) VALUES (?, ?, ?)", (existing["id"], candidate.price_value, now))
                     updates.extend(["ai_assessment_text = ?", "ai_assessed_at = ?"])
                     values.extend(["", None])
+                    target = existing["target_price"]
+                    if target is not None and existing["price_value"] is not None and existing["price_value"] > target >= candidate.price_value and not existing["user_hidden"]:
+                        enqueue(db, profile, existing["id"], app_settings, "Target price reached", "target:" + str(target) + ":" + now)
                 refresh_existing_listing_fields(existing, candidate, updates, values)
                 if not bool(existing["user_hidden"]):
                     result = apply_filters(candidate, profile)
@@ -1080,35 +1130,20 @@ async def _run_profile(profile_id: int) -> dict[str, Any]:
                 continue
             stats["new"] += 1
             db.commit()
-            if should_auto_assess_new_listing(app_settings):
+            if should_auto_assess_new_listing(app_settings) and stats["new"] <= 5:
                 try:
-                    assessment_text = await generate_ai_text(app_settings, listing_assessment_prompt(row_to_listing(listing)), max_tokens=220)
+                    messages = listing_assessment_prompt(row_to_listing(listing))
+                    assessment_text = await generate_ai_text(app_settings, messages, max_tokens=220)
                     assessed_at = utc_now()
                     db.execute(
-                        "UPDATE listings SET ai_assessment_text = ?, ai_assessed_at = ? WHERE id = ?",
-                        (assessment_text.strip()[:1200], assessed_at, listing_id),
+                        "UPDATE listings SET ai_assessment_text = ?, ai_assessed_at = ?, ai_assessment_key = ? WHERE id = ?",
+                        (assessment_text.strip()[:1200], assessed_at, assessment_key(app_settings, messages), listing_id),
                     )
                     db.commit()
                     listing = db.execute("SELECT * FROM listings WHERE id = ?", (listing_id,)).fetchone()
                 except HTTPException:
                     pass
-            delivered = False
-            if profile["notify_telegram"] and notifier.configured:
-                try:
-                    await notifier.send_listing(row_to_listing(listing), profile, result.matched_reason)
-                    delivered = True
-                except Exception:
-                    pass
-            if profile["notify_webhook"] and webhook.configured:
-                try:
-                    await webhook.send_listing(row_to_listing(listing), profile, result.matched_reason)
-                    delivered = True
-                except Exception:
-                    pass
-            if delivered:
-                db.execute("UPDATE listings SET status = 'notified', notified_at = ? WHERE id = ?", (utc_now(), listing_id))
-                db.commit()
-                stats["notified"] += 1
+            enqueue(db, profile, listing_id, app_settings, result.matched_reason)
         db.execute("UPDATE watch_profiles SET last_run_at = ?, updated_at = ? WHERE id = ?", (now, now, profile_id))
     stats.update(await verify_unseen_listing_availability(profile, app_settings, now))
     with connect() as db:

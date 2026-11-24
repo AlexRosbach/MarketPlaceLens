@@ -124,3 +124,7 @@ MIT License, see [LICENSE](LICENSE).
 
 ### New-price comparison (experimental)
 Open **New-price comparison & price history** on a listing or review card. Configure `MARKETPLACELENS_EBAY_CLIENT_ID` and `MARKETPLACELENS_EBAY_CLIENT_SECRET` in your local environment for the official eBay Browse API (production access required). Results are possible matches, not guaranteed identical products; compare condition, model and shipping. Without credentials the UI shows search links only. Amazon prices are not retrieved until an approved provider and usage rights for this price-comparison application are available. No Amazon scraping or invented prices. eBay responses are cached in memory for 15 minutes.
+
+
+### Performance and reliability
+Search results are cached for two minutes per user/source/query/session, images for ten minutes within a 32 MiB memory budget. Availability checks are bounded and only revisit stale, unseen listings. Price history and optional target-price notifications are based on marketplace listings, not Amazon prices. Notification delivery is asynchronous and retried up to five times (at-least-once; duplicate delivery is possible after an ambiguous network failure). `GET /api/connector-health` exposes aggregate run metrics to administrators.

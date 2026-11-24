@@ -2289,8 +2289,21 @@ function priceToolsMarkup(listing) {
   return `<details class="price-tools" data-price-tools data-listing-id="${listing.id}">
     <summary>${de ? "Neupreisvergleich & Preisverlauf" : "New-price comparison & price history"}</summary>
     <div data-price-content class="meta"></div>
+    <label class="meta">${de ? "Wunschpreis (€)" : "Target price (€)"} <input type="number" min="0" step="0.01" data-target-price value="${escapeAttribute(listing.target_price ?? "")}"></label>
+    <button type="button" class="mini-button" data-save-target>${de ? "Speichern" : "Save"}</button>
   </details>`;
 }
+
+document.addEventListener("click", async (event) => {
+  const button = event.target.closest?.("[data-save-target]");
+  if (!button) return;
+  const panel = button.closest("[data-price-tools]");
+  const value = panel.querySelector("[data-target-price]").value;
+  try {
+    await api(`/api/listings/${Number(panel.dataset.listingId)}/target-price`, {method:"PUT", body:JSON.stringify({target_price:value === "" ? null : Number(value)})});
+    toast(state.language === "de" ? "Wunschpreis gespeichert" : "Target price saved");
+  } catch { toast(state.language === "de" ? "Wunschpreis konnte nicht gespeichert werden" : "Could not save target price"); }
+});
 
 document.addEventListener("toggle", async (event) => {
   const panel = event.target;

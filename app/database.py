@@ -168,6 +168,8 @@ def init_db() -> None:
         ensure_column(db, "listings", "availability_checked_at", "TEXT")
         ensure_column(db, "listings", "ai_assessment_text", "TEXT NOT NULL DEFAULT ''")
         ensure_column(db, "listings", "ai_assessed_at", "TEXT")
+        ensure_column(db, "listings", "ai_assessment_key", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(db, "listings", "target_price", "REAL")
         ensure_column(db, "watch_profiles", "notify_webhook", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(db, "watch_profiles", "user_id", "INTEGER REFERENCES users(id)")
         ensure_column(db, "watch_profiles", "max_listing_age_days", "INTEGER NOT NULL DEFAULT 365")
@@ -205,6 +207,13 @@ def init_db() -> None:
                 price_value REAL NOT NULL, observed_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_price_history_listing ON listing_price_history(listing_id, observed_at DESC);
+            CREATE TABLE IF NOT EXISTS notification_outbox (
+                id INTEGER PRIMARY KEY, listing_id INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+                channel TEXT NOT NULL, event_key TEXT NOT NULL, reason TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TEXT NOT NULL, UNIQUE(listing_id, channel, event_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_notification_due ON notification_outbox(state, next_attempt_at);
         """)
         ensure_admin_user(db)
         assign_unowned_profiles_to_admin(db)
