@@ -4,6 +4,10 @@ import hashlib
 import ipaddress
 import json
 import re
+import socket
+import asyncio
+import ssl
+import httpcore
 from dataclasses import dataclass
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
@@ -37,9 +41,11 @@ class MarketplaceConnector:
 
     def validate_search_url(self, url: str) -> None:
         parsed = urlparse(url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username is not None or parsed.password is not None:
             raise ValueError("Search URL must be an absolute http(s) URL.")
         validate_public_fetch_host(parsed.hostname or "")
+        if self.source_type == "kleinanzeigen" and parsed.hostname.lower() not in {"kleinanzeigen.de", "www.kleinanzeigen.de"}:
+            raise ValueError("Kleinanzeigen jobs need a Kleinanzeigen URL.")
         if self.source_type == "facebook":
             host = parsed.netloc.lower()
             path = parsed.path.rstrip("/").lower()
@@ -53,6 +59,10 @@ class MarketplaceConnector:
             host = parsed.netloc.lower()
             if host not in {"mobile.de", "www.mobile.de", "suchen.mobile.de"}:
                 raise ValueError("mobile.de jobs need a mobile.de or suchen.mobile.de URL.")
+        if self.source_type == "marktplaats":
+            host = parsed.netloc.lower()
+            if host not in {"marktplaats.nl", "www.marktplaats.nl"}:
+                raise ValueError("Marktplaats jobs need a marktplaats.nl URL.")
 
     async def fetch_listings(self, profile: dict) -> list[ListingCandidate]:
         raise NotImplementedError
@@ -66,8 +76,59 @@ def validate_public_fetch_host(hostname: str) -> None:
         ip = ipaddress.ip_address(host)
     except ValueError:
         return
-    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved:
+    if not ip.is_global or ip.is_multicast:
         raise ValueError("Search URLs must not target local or private network hosts.")
+
+
+async def resolve_public_addresses(host: str, port: int) -> list[str]:
+    validate_public_fetch_host(host)
+    records = await asyncio.wait_for(
+        asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM), timeout=5)
+    addresses = list(dict.fromkeys(record[4][0] for record in records))
+    if not addresses or any(not ipaddress.ip_address(address).is_global or
+                            ipaddress.ip_address(address).is_multicast for address in addresses):
+        raise ValueError("Non-public address")
+    return addresses
+
+
+class PublicNetworkBackend(httpcore.AnyIOBackend):
+    """Connect to a validated IP while httpcore retains the original TLS hostname."""
+    async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        try:
+            addresses = await resolve_public_addresses(host, port)
+        except (ValueError, OSError, TimeoutError) as exc:
+            raise httpcore.ConnectError("Outbound host is not permitted") from exc
+        last_error = None
+        for address in addresses:
+            try:
+                return await super().connect_tcp(address, port, timeout, local_address, socket_options)
+            except (httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
+                last_error = exc
+        raise last_error or httpcore.ConnectError("Outbound host is unavailable")
+
+
+class PublicHTTPTransport(httpx.AsyncHTTPTransport):
+    def __init__(self):
+        # httpx 0.28 delegates HTTP/TLS to this httpcore connection pool.
+        # Pin the verified destination at connection time (including redirects).
+        super().__init__(trust_env=False)
+        self._pool = httpcore.AsyncConnectionPool(
+            ssl_context=ssl.create_default_context(), network_backend=PublicNetworkBackend(),
+            max_connections=10, max_keepalive_connections=5)
+
+
+async def validate_public_request(request: httpx.Request) -> None:
+    url = request.url
+    host = url.host
+    try:
+        if url.scheme not in {"http", "https"} or not host or url.userinfo:
+            raise ValueError("Unsupported outbound URL")
+        validate_public_fetch_host(host)
+        if "cookie" in request.headers and (url.scheme != "https" or host.lower() not in
+                {"facebook.com", "www.facebook.com", "m.facebook.com"}):
+            request.headers.pop("cookie", None)
+    except ValueError as exc:
+        raise httpx.RequestError("Outbound URL is not permitted", request=request) from exc
 
 
 class HtmlListingConnector(MarketplaceConnector):
@@ -85,7 +146,7 @@ class HtmlListingConnector(MarketplaceConnector):
         self.validate_search_url(search_url)
         user_agent = (
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-            if self.source_type in {"facebook", "mobilede"}
+            if self.source_type in {"facebook", "mobilede", "marktplaats"}
             else settings.user_agent
         )
         request_headers = {
@@ -106,6 +167,10 @@ class HtmlListingConnector(MarketplaceConnector):
         async with httpx.AsyncClient(
             headers=request_headers,
             follow_redirects=True,
+            max_redirects=5,
+            trust_env=False,
+            transport=PublicHTTPTransport(),
+            event_hooks={"request": [validate_public_request]},
             timeout=20.0,
         ) as client:
             try:
@@ -157,6 +222,14 @@ class HtmlListingConnector(MarketplaceConnector):
                     "Use a concrete mobile.de search result URL copied from the browser."
                 )
             return listings
+        if self.source_type == "marktplaats":
+            listings = self.parse_marktplaats_listings(response.text, profile)
+            if not listings:
+                raise ValueError(
+                    "Marktplaats returned HTML without public listing cards. "
+                    "Use a public Marktplaats search result URL copied from the browser."
+                )
+            return listings
         return self.parse_listings(response.text, profile)
 
     async def fetch_paginated_kleinanzeigen(
@@ -173,7 +246,6 @@ class HtmlListingConnector(MarketplaceConnector):
         current_url = first_url
         for _ in range(12):
             page_candidates = self.parse_kleinanzeigen_listings(html, profile)
-            await self.fill_missing_kleinanzeigen_posted_dates(client, page_candidates)
             for candidate in page_candidates:
                 if candidate.content_hash in seen:
                     continue
@@ -187,7 +259,9 @@ class HtmlListingConnector(MarketplaceConnector):
             response.raise_for_status()
             html = response.text
             current_url = str(response.url)
-        return candidates[:500]
+        candidates = candidates[:500]
+        await self.fill_missing_kleinanzeigen_posted_dates(client, candidates)
+        return candidates
 
     async def fill_missing_kleinanzeigen_posted_dates(
         self,
@@ -195,7 +269,7 @@ class HtmlListingConnector(MarketplaceConnector):
         candidates: list[ListingCandidate],
     ) -> None:
         missing = [candidate for candidate in candidates if not candidate.posted_at_text]
-        for candidate in missing[:24]:
+        for candidate in missing[:12]:
             try:
                 response = await client.get(candidate.listing_url)
                 response.raise_for_status()
@@ -260,7 +334,14 @@ class HtmlListingConnector(MarketplaceConnector):
 
     def parse_kleinanzeigen_listings(self, html: str, profile: dict) -> list[ListingCandidate]:
         soup = BeautifulSoup(html, "html.parser")
-        cards = [node for node in soup.select("#srchrslt-adtable .ad-listitem, .aditem") if isinstance(node, Tag)]
+        # Kleinanzeigen migrated its search result cards from the legacy
+        # ``.aditem`` markup to ``article[data-adid]``.  Keep both selectors
+        # while the old response shape is still encountered in cached pages.
+        cards = [
+            node
+            for node in soup.select("article[data-adid], .aditem, #srchrslt-adtable .ad-listitem")
+            if isinstance(node, Tag)
+        ]
         if not cards:
             return []
 
@@ -268,9 +349,9 @@ class HtmlListingConnector(MarketplaceConnector):
         seen: set[str] = set()
         for card in cards[:200]:
             candidate = self.normalize_kleinanzeigen_listing(card, profile["search_url"])
-            if not candidate or candidate.content_hash in seen:
+            if not candidate or candidate.source_listing_id in seen:
                 continue
-            seen.add(candidate.content_hash)
+            seen.add(candidate.source_listing_id)
             candidates.append(candidate)
         return candidates
 
@@ -288,8 +369,12 @@ class HtmlListingConnector(MarketplaceConnector):
         title = clean_text(first_text(card, [".aditem-main .text-module-begin", ".ellipsis", "h2", "h3", "a"]))
         if not title or not listing_url or is_non_listing_artifact(self.source_type, title, listing_url):
             return None
-        price_text = clean_text(first_text(card, [".aditem-main--middle--price-shipping--price", "[class*=price]"]))
-        location_text = clean_text(first_text(card, [".aditem-main--top--left", "[class*=location]"]))
+        price_text = clean_text(
+            first_text(card, [".aditem-main--middle--price-shipping--price", "[class*=price]", "p.text-title3"])
+        )
+        location_text = clean_text(
+            first_text(card, [".aditem-main--top--left", "[class*=location]", ".text-onSurfaceNonessential span"])
+        )
         posted_at_text = parse_kleinanzeigen_card_posted_at(card)
         tags = clean_text(first_text(card, [".aditem-main--middle--tags"]))
         snippet = clean_text(first_text(card, [".aditem-main--middle--description", "[class*=description]", "p"]))
@@ -355,6 +440,50 @@ class HtmlListingConnector(MarketplaceConnector):
                 continue
             seen.add(candidate.content_hash)
             candidates.append(candidate)
+        return candidates
+
+    def parse_marktplaats_listings(self, html: str, profile: dict) -> list[ListingCandidate]:
+        soup = BeautifulSoup(html, "html.parser")
+        cards = [node for node in soup.select("li.hz-Listing") if isinstance(node, Tag)]
+        candidates: list[ListingCandidate] = []
+        seen: set[str] = set()
+        for card in cards[:200]:
+            anchor = card.select_one("a[href^='/v/']")
+            if not isinstance(anchor, Tag):
+                continue
+            listing_url = urljoin("https://www.marktplaats.nl", str(anchor.get("href") or ""))
+            if not is_marktplaats_listing_url(listing_url):
+                continue
+            title = clean_text(first_text(card, ["span[class*=ListingTitle]", "h2", "h3"]))
+            if not title or is_non_listing_artifact(self.source_type, title, listing_url):
+                continue
+            price_text = clean_text(first_text(card, ["[class*=ListingPrice]", ".hz-price-date-feature", "[class*=price]"]))
+            location_text = clean_text(first_text(card, ["[class*=ListingLocation]", "[data-testid=location-label]"]))
+            posted_at_text = clean_text(first_text(card, ["[class*=ListingDate]", "time", "[class*=date]"]))
+            snippet = clean_text(first_text(card, ["[class*=ListingDescription]", "[class*=description]", "p"]))
+            image = card.find("img")
+            thumbnail_url = ""
+            if isinstance(image, Tag):
+                thumbnail_url = urljoin("https://www.marktplaats.nl", str(image.get("src") or image.get("data-src") or ""))
+            source_listing_id = extract_listing_id(listing_url)
+            hash_input = "|".join([source_listing_id, title, price_text, location_text])
+            candidate = ListingCandidate(
+                source_type=self.source_type,
+                source_listing_id=source_listing_id,
+                title=title,
+                price_text=price_text,
+                price_value=parse_price(price_text),
+                location_text=location_text,
+                category_text="",
+                posted_at_text=posted_at_text,
+                description_snippet=snippet[:400],
+                listing_url=listing_url,
+                thumbnail_url=thumbnail_url,
+                content_hash=hashlib.sha256(hash_input.encode("utf-8")).hexdigest(),
+            )
+            if candidate.content_hash not in seen:
+                seen.add(candidate.content_hash)
+                candidates.append(candidate)
         return candidates
 
     def normalize_mobilede_listing(self, item: dict, base_url: str) -> ListingCandidate | None:
@@ -565,7 +694,13 @@ def first_text(card: Tag, selectors: list[str]) -> str:
 
 def is_kleinanzeigen_listing_url(url: str) -> bool:
     parsed = urlparse(urljoin("https://www.kleinanzeigen.de", url))
-    return "kleinanzeigen.de" in parsed.netloc.lower() and "/s-anzeige/" in parsed.path
+    return (parsed.scheme in {"http", "https"} and parsed.hostname in {"kleinanzeigen.de", "www.kleinanzeigen.de"}
+            and parsed.username is None and parsed.password is None and parsed.path.startswith("/s-anzeige/"))
+
+
+def is_marktplaats_listing_url(url: str) -> bool:
+    parsed = urlparse(urljoin("https://www.marktplaats.nl", url))
+    return parsed.netloc.lower() in {"marktplaats.nl", "www.marktplaats.nl"} and parsed.path.startswith("/v/")
 
 
 def is_non_listing_artifact(source_type: str, title: str, listing_url: str) -> bool:
@@ -752,10 +887,17 @@ def parse_price(value: str) -> float | None:
     lowered = value.lower()
     if "kostenlos" in lowered or "free" in lowered or "zu verschenken" in lowered:
         return 0.0
-    match = re.search(r"(\d+(?:[.,]\d{1,2})?)", lowered.replace(".", ""))
+    match = re.search(r"\d+(?:[.,\s]\d+)*", lowered)
     if not match:
         return None
-    return float(match.group(1).replace(",", "."))
+    number = re.sub(r"\s+", "", match.group())
+    # The last separator denotes cents only when followed by one or two digits.
+    decimal = re.search(r"[.,](\d{1,2})$", number)
+    if decimal:
+        number = re.sub(r"[.,]", "", number[:decimal.start()]) + "." + decimal.group(1)
+    else:
+        number = re.sub(r"[.,]", "", number)
+    return float(number)
 
 
 def extract_mobilede_initial_state(html: str) -> dict:
@@ -794,6 +936,6 @@ def extract_mobilede_initial_state(html: str) -> dict:
 
 
 def get_connector(source_type: str) -> MarketplaceConnector:
-    if source_type in {"html", "kleinanzeigen", "facebook", "mobilede"}:
+    if source_type in {"html", "kleinanzeigen", "facebook", "mobilede", "marktplaats"}:
         return HtmlListingConnector(source_type)
     raise ValueError(f"Unsupported source type: {source_type}")

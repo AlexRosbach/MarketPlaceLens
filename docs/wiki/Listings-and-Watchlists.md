@@ -2,6 +2,8 @@
 
 Listings are normalized results imported from job runs.
 
+Listing cards use Kramlet-inspired product motion: cards enter with a short stagger, lift subtly on hover, and keep image zoom contained inside the card frame. The swipe card follows horizontal drag movement before either settling back or marking the listing seen.
+
 ## Listing Status
 
 - `new`: active listing

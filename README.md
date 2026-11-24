@@ -41,6 +41,7 @@ MarketPlaceLens is an app by Alex Rosbach. Legal notice and project contact info
 | Kleinanzeigen | Stable | Main supported connector for public search/category URLs |
 | Facebook Marketplace | **In testing** | Often returns login, consent, location, or JavaScript-only pages |
 | mobile.de | **In testing** | Public HTML support is limited; official API access is separate |
+| Marktplaats.nl | **In testing** | Public Dutch search result URLs are supported; platform access limits still apply |
 | Generic HTML | Experimental | Basic parser for simple result pages |
 
 ## Screenshots
@@ -65,7 +66,7 @@ Demo data, no real listings.
 - Optional AI buyer text, quick-job drafts, and listing assessments
 - Multi-user login with admin settings and user-owned jobs
 - German/English UI, dark/light mode, and mobile layouts
-- Defensive URL validation prevents saved jobs and image proxy requests from targeting local or private network hosts
+- Public marketplace and image fetches validate and pin public destination addresses; configure network egress restrictions as defense in depth.
 
 ## Quick Start
 
@@ -78,10 +79,17 @@ docker compose up -d
 Open:
 
 ```text
-http://<your-host-ip>:8091
+http://127.0.0.1:8091
 ```
 
-On first start, MarketPlaceLens asks you to create the first admin account.
+On first start, MarketPlaceLens asks you to create the first admin account. For trusted LAN access, explicitly set `MARKETPLACELENS_BIND_ADDRESS=0.0.0.0`. Set `MARKETPLACELENS_COOKIE_SECURE=true` behind an HTTPS reverse proxy. Existing sessions require a fresh sign-in after upgrading.
+
+To reset an admin password from the container CLI:
+
+```bash
+docker exec -it marketplacelens reset-password
+docker exec -it marketplacelens reset-password --username admin
+```
 
 ## Docker Images
 
@@ -112,3 +120,23 @@ MarketPlaceLens is intended for private self-hosted use with marketplace URLs yo
 ## License
 
 MIT License, see [LICENSE](LICENSE).
+
+
+### New-price comparison (experimental)
+Open **New-price comparison & price history** on a listing or review card. Configure `MARKETPLACELENS_EBAY_CLIENT_ID` and `MARKETPLACELENS_EBAY_CLIENT_SECRET` in your local environment for the official eBay Browse API (production access required). Results are possible matches, not guaranteed identical products; compare condition, model and shipping. Without credentials the UI shows search links only. Amazon Creators API support is disabled by default. Only enable `MARKETPLACELENS_AMAZON_APPROVED=true` after obtaining explicit approval for this comparison and price-alert-enabled application and ensuring the applicable display/affiliate requirements are met. Configure `MARKETPLACELENS_AMAZON_CLIENT_ID`, `MARKETPLACELENS_AMAZON_CLIENT_SECRET`, `MARKETPLACELENS_AMAZON_PARTNER_TAG` and the credential version (default `3.2`). The API returns featured offers, not a comprehensive lowest-price guarantee; show available new/used offers with links and retrieval time. Amazon data is not stored in listing price history or used in alerts. No scraping or invented prices. Both provider responses are cached in memory for 15 minutes. See https://partnernet.amazon.de/help/operating/policies and https://partnernet.amazon.de/creatorsapi/docs/en-us/introduction.
+
+
+### Performance and reliability
+Search results are cached for two minutes per user/source/query/session, images for ten minutes within a 32 MiB memory budget. Availability checks are bounded and only revisit stale, unseen listings. Price history and optional target-price notifications are based on marketplace listings, not Amazon prices. Notification delivery is asynchronous and retried up to five times (at-least-once; duplicate delivery is possible after an ambiguous network failure). `GET /api/connector-health` exposes aggregate run metrics to administrators.
+
+
+### Duplicate candidates and maintenance
+The price details panel also lists possible cross-source duplicates with a conservative title/model/price/location match. Results are suggestions only and never delete or merge listings. Radius filters outside supported sources are marked unverified and hidden rather than claiming a verified distance. Full geocoding remains a follow-up.
+
+Use `docker exec marketplacelens python -m app.cli.housekeeping backup /data/backups/backup.db` for a consistent SQLite backup (new filename required). Use `docker exec marketplacelens python -m app.cli.housekeeping cleanup --days 180` to preview old, unprotected rows; add `--apply` only after a verified backup. Schedule these commands externally if required. Keep backups private and use unique filenames. Automatic retention/rotation is not enabled.
+
+
+### Optional local MCP companion
+Install `requirements-mcp.txt` into a separate Python environment. Run `python -m app.mcp_companion` via a local MCP client using stdio, setting `MARKETPLACELENS_DB_PATH` to the local SQLite database and `MARKETPLACELENS_MCP_USER_ID` to an explicitly chosen enabled user's numeric ID. The connection is read-only and every tool is scoped to that user, including when the chosen user is an admin. No remote HTTP transport or remote authentication is provided; protect the database and local process environment with OS permissions. Tools: list jobs, search listings/watchlisted items and read price history. Never expose the database mount publicly.
+
+Provider comparisons are loaded on demand and limited to 30 uncached queries per hour per process. A price difference before shipping is shown only for a high-overlap candidate, not a verified product identity. Failed polling jobs back off up to six hours. Listing, review and watchlist data are loaded when their respective view is opened.

@@ -1,0 +1,109 @@
+name: Validation
+on:
+  pull_request:
+  push:
+    branches: [main, codex/refresh-marketplacelens-screenshots]
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt pytest
+      - run: pytest -q
+        env:
+          MARKETPLACELENS_DB_PATH: /tmp/marketplacelens-ci.db
+          MARKETPLACELENS_POLL_ENABLED: 'false'
+      - run: node --check app/static/app.js
+      - run: docker build -t marketplacelens-ci .
+  mcp-companion:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements-mcp.txt pytest
+      - run: pytest -q tests/test_mcp_companion.py
+  dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pip-audit
+      - run: pip-audit -r requirements.txt
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: 'false'
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: 'false'
+
+  publish-dev:
+    if: github.event_name == 'push' && github.repository == 'AlexRosbach/MarketPlaceLens' && github.ref == 'refs/heads/codex/refresh-marketplacelens-screenshots'
+    needs: [tests, mcp-companion, dependencies, secrets]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    concurrency:
+      group: marketplacelens-dockerhub-dev
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build development image with exact provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build \
+            --build-arg MARKETPLACELENS_BUILD_CODE="$(date -u +%Y%m%d.%H%M)" \
+            --build-arg MARKETPLACELENS_BUILD_COMMIT="$GITHUB_SHA" \
+            --build-arg MARKETPLACELENS_BUILD_BRANCH="$GITHUB_REF_NAME" \
+            --build-arg MARKETPLACELENS_BUILD_CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            --label org.opencontainers.image.source="https://github.com/AlexRosbach/MarketPlaceLens" \
+            -t alexrosbach/marketplacelens:dev \
+            -t "alexrosbach/marketplacelens:dev-$GITHUB_SHA" .
+      - name: Smoke test exact image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name mpl-smoke -p 127.0.0.1:18091:8080 -e MARKETPLACELENS_POLL_ENABLED=false alexrosbach/marketplacelens:dev
+          trap 'docker rm -f mpl-smoke >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18091/api/version > /tmp/mpl-version.json; then break; fi
+            sleep 2
+          done
+          python -c 'import json,os; d=json.load(open("/tmp/mpl-version.json")); assert d["commit"] == os.environ["GITHUB_SHA"], d; print(d)'
+      - name: Sign in to Docker Hub
+        shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME || 'alexrosbach' }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN || secrets.DOCKERHUB_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "::error::Set the repository Actions secret DOCKERHUB_TOKEN to a Docker Hub access token with write access."
+            exit 1
+          fi
+          printf '%s' "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+      - name: Push development tags only
+        run: |
+          docker push "alexrosbach/marketplacelens:dev-$GITHUB_SHA"
+          docker push alexrosbach/marketplacelens:dev
+          docker buildx imagetools inspect alexrosbach/marketplacelens:dev
+      - name: Sign out
+        if: always()
+        run: docker logout || true

@@ -4,6 +4,8 @@ All notable changes to MarketPlaceLens are documented here.
 
 ## Unreleased
 
+- Listing and swipe cards now use Kramlet-inspired motion: staggered card entrance, stronger hover lift, image zoom, and live swipe-card drag feedback.
+- Added a container `reset-password` CLI for resetting and re-enabling an admin account directly in SQLite.
 - README and full documentation now explain the product advantage over native marketplace searches: granular search rules, a unified review workflow, and built-in AI assistance.
 - README now uses the LanLens-style Buy Me a Coffee button and explains that voluntary support does not buy support priority, features, or access.
 - README screenshots now use consistent laptop and docking-station demo listings instead of mismatched product images.

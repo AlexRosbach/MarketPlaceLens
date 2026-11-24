@@ -1,5 +1,6 @@
 beautifulsoup4==4.12.3
-fastapi==0.138.0
+fastapi==0.163.2
 httpx==0.28.1
 pydantic==2.10.4
 uvicorn[standard]==0.34.0
+httpcore==1.0.9

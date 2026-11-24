@@ -47,6 +47,7 @@ def connect() -> Iterator[sqlite3.Connection]:
 
 def init_db() -> None:
     with connect() as db:
+        db.execute("PRAGMA journal_mode = WAL")
         db.executescript(
             """
             CREATE TABLE IF NOT EXISTS watch_profiles (
@@ -107,6 +108,13 @@ def init_db() -> None:
               value TEXT NOT NULL DEFAULT ''
             );
 
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+              token_hash TEXT PRIMARY KEY,
+              user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              password_hash TEXT NOT NULL,
+              expires_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at);
             CREATE TABLE IF NOT EXISTS users (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               username TEXT NOT NULL UNIQUE,
@@ -160,9 +168,13 @@ def init_db() -> None:
         ensure_column(db, "listings", "availability_checked_at", "TEXT")
         ensure_column(db, "listings", "ai_assessment_text", "TEXT NOT NULL DEFAULT ''")
         ensure_column(db, "listings", "ai_assessed_at", "TEXT")
+        ensure_column(db, "listings", "ai_assessment_key", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(db, "listings", "target_price", "REAL")
         ensure_column(db, "watch_profiles", "notify_webhook", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(db, "watch_profiles", "user_id", "INTEGER REFERENCES users(id)")
         ensure_column(db, "watch_profiles", "max_listing_age_days", "INTEGER NOT NULL DEFAULT 365")
+        ensure_column(db, "watch_profiles", "consecutive_failures", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(db, "watch_profiles", "retry_after", "TEXT")
         ensure_column(db, "users", "display_name", "TEXT NOT NULL DEFAULT ''")
         ensure_column(db, "users", "buyer_location", "TEXT NOT NULL DEFAULT ''")
         ensure_column(db, "users", "contact_hint", "TEXT NOT NULL DEFAULT ''")
@@ -186,6 +198,25 @@ def init_db() -> None:
               )
             """
         )
+        db.executescript("""
+            CREATE INDEX IF NOT EXISTS idx_listings_profile_status_checked ON listings(profile_id, status, availability_checked_at);
+            CREATE INDEX IF NOT EXISTS idx_listings_first_seen ON listings(first_seen_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_profiles_enabled_run ON watch_profiles(enabled, last_run_at);
+            CREATE INDEX IF NOT EXISTS idx_profiles_owner ON watch_profiles(user_id);
+            CREATE INDEX IF NOT EXISTS idx_run_logs_profile_finished ON run_logs(profile_id, finished_at DESC);
+            CREATE TABLE IF NOT EXISTS listing_price_history (
+                id INTEGER PRIMARY KEY, listing_id INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+                price_value REAL NOT NULL, observed_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_price_history_listing ON listing_price_history(listing_id, observed_at DESC);
+            CREATE TABLE IF NOT EXISTS notification_outbox (
+                id INTEGER PRIMARY KEY, listing_id INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+                channel TEXT NOT NULL, event_key TEXT NOT NULL, reason TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TEXT NOT NULL, UNIQUE(listing_id, channel, event_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_notification_due ON notification_outbox(state, next_attempt_at);
+        """)
         ensure_admin_user(db)
         assign_unowned_profiles_to_admin(db)
         default_watchlist_id = ensure_default_watchlist(db)
@@ -264,10 +295,9 @@ def ensure_admin_user(db: sqlite3.Connection) -> None:
     row = db.execute("SELECT id FROM users WHERE role = 'admin' LIMIT 1").fetchone()
     if row:
         return
-    if not settings.admin_password:
+    if len(settings.admin_password) < 8 or settings.admin_password.lower() == "admin":
         return
-    stored_hash = db.execute("SELECT value FROM app_settings WHERE key = 'admin_password_hash'").fetchone()
-    password_hash = stored_hash["value"] if stored_hash and stored_hash["value"] else hash_password_for_bootstrap(settings.admin_password)
+    password_hash = hash_password_for_bootstrap(settings.admin_password)
     db.execute(
         """
         INSERT OR IGNORE INTO users(username, password_hash, role, enabled, created_at, updated_at)

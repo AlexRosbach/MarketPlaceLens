@@ -9,6 +9,8 @@ from pathlib import Path
 def persistent_session_secret(db_path: str) -> str:
     env_secret = os.getenv("MARKETPLACELENS_SESSION_SECRET", "").strip()
     if env_secret:
+        if len(env_secret) < 32:
+            raise ValueError("MARKETPLACELENS_SESSION_SECRET must contain at least 32 characters")
         return env_secret
     secret_file = Path(os.getenv("MARKETPLACELENS_SESSION_SECRET_FILE", "") or Path(db_path).with_name("session.secret"))
     secret_file.parent.mkdir(parents=True, exist_ok=True)
@@ -17,7 +19,15 @@ def persistent_session_secret(db_path: str) -> str:
         if value:
             return value
     value = secrets.token_urlsafe(48)
-    secret_file.write_text(value, encoding="utf-8")
+    try:
+        fd = os.open(secret_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        existing = secret_file.read_text(encoding="utf-8").strip()
+        if not existing:
+            raise RuntimeError("Session secret file is empty")
+        return existing
+    with os.fdopen(fd, "w", encoding="utf-8") as target:
+        target.write(value)
     try:
         secret_file.chmod(0o600)
     except OSError:
@@ -40,6 +50,7 @@ class Settings:
     webhook_url: str = os.getenv("MARKETPLACELENS_WEBHOOK_URL", "")
     admin_username: str = os.getenv("MARKETPLACELENS_ADMIN_USERNAME", "admin")
     admin_password: str = os.getenv("MARKETPLACELENS_ADMIN_PASSWORD", "")
+    cookie_secure: bool = os.getenv("MARKETPLACELENS_COOKIE_SECURE", "false").lower() == "true"
     session_secret: str = persistent_session_secret(db_path)
 
 

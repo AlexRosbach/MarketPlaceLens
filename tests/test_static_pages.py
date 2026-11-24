@@ -47,6 +47,14 @@ class StaticPageTests(unittest.TestCase):
         self.assertIn('"notebooks"', app_js)
         self.assertIn('"278"', app_js)
 
+    def test_marktplaats_is_selectable_and_builds_search_urls(self) -> None:
+        app_js = (Path(__file__).resolve().parents[1] / "app" / "static" / "app.js").read_text(encoding="utf-8")
+        index_html = (Path(__file__).resolve().parents[1] / "app" / "static" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('marktplaats: [', app_js)
+        self.assertIn('https://www.marktplaats.nl', app_js)
+        self.assertIn('value="marktplaats"', index_html)
+
 
 if __name__ == "__main__":
     unittest.main()

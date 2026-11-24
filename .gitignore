@@ -8,3 +8,17 @@ data/
 node_modules/
 .DS_Store
 
+
+.env.*
+!.env.example
+*.secret
+*.pem
+*.key
+*.p12
+*.pfx
+*.log
+*.bak
+*.sqlite*
+*.db*
+backups/
+secrets/

@@ -30,7 +30,7 @@ docker compose up -d
 Open:
 
 ```text
-http://<your-host-ip>:8091
+http://127.0.0.1:8091
 ```
 
 On first start, MarketPlaceLens displays a platform-rules notice and then creates the first admin password. No normal deployment ships with a default password.
@@ -41,6 +41,17 @@ For local development:
 cp .env.example .env
 docker compose up -d --build
 ```
+
+### Resetting Admin Access
+
+If an admin password is lost, use the container CLI to reset it directly in SQLite:
+
+```bash
+docker exec -it marketplacelens reset-password
+docker exec marketplacelens reset-password --username admin --password "MyNewPass123"
+```
+
+The command enables the selected admin user and updates its password hash without depending on a running API session.
 
 ## 2. Core Concepts
 
@@ -77,6 +88,7 @@ Review mode shows one listing at a time with image, price, location, source, AI 
 | Kleinanzeigen | Stable primary path | Best-supported connector. Supports public search/category URLs, price, age, keyword, location/radius, and listing type handling. |
 | Facebook Marketplace | **In testing** | Works only when Facebook returns listing links to the server. Facebook frequently returns login, consent, location, or JavaScript shell pages. Optional Cookie headers are stored locally and sent only to `facebook.com`. |
 | mobile.de | **In testing** | Reads public search pages when embedded vehicle result data is available. The official mobile.de Search API needs separate Basic Auth access. |
+| Marktplaats.nl | **In testing** | Reads public Dutch search result pages and normalizes listings into the regular review flow. Use public search URLs only; login, CAPTCHA, rate limits, and platform access controls are not bypassed. |
 | Generic HTML | Experimental | Basic fallback for simple link-card result pages. It is not a universal parser. |
 
 MarketPlaceLens does not bypass login walls, CAPTCHA, bot protection, private APIs, blocked sessions, or platform access controls.
@@ -110,6 +122,8 @@ Listings can be:
 - marked contacted
 - shown on a map by ZIP/place
 - enriched with AI assessment text
+
+Listing and swipe cards use product-focused motion inspired by Kramlet: cards enter with a short stagger, lift subtly on hover, images zoom within the card frame, and the swipe card follows the pointer while dragging before it settles back or advances.
 
 The default active listing view excludes seen and hidden items unless the user explicitly changes filters.
 
@@ -234,3 +248,6 @@ MarketPlaceLens is intended for private self-hosted use with URLs the operator i
 - No local thumbnail mirroring; images are proxied on demand
 
 The maintainer does not guarantee third-party platform compatibility and does not take responsibility for misuse, blocked accounts, denied access, data processing, or third-party policy violations.
+
+
+For local-only access the Compose port binds to `127.0.0.1` by default. Set `MARKETPLACELENS_BIND_ADDRESS=0.0.0.0` only for intended LAN exposure and `MARKETPLACELENS_COOKIE_SECURE=true` for HTTPS. Existing users must sign in again after the session migration.

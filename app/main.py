@@ -7,6 +7,8 @@ import random
 import sqlite3
 import time
 import re
+import logging
+from collections import deque
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -17,20 +19,48 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from .auth import COOKIE_NAME, create_session, current_user_from_session, hash_password, valid_credentials
+from .auth import COOKIE_NAME, create_session, current_user_from_session, hash_password, valid_credentials, revoke_session
 from .config import settings
-from .connectors import ListingCandidate, facebook_browser_headers, get_connector, is_non_listing_artifact, parse_listing_availability, safe_cookie_header, validate_public_fetch_host
+from .connectors import ListingCandidate, facebook_browser_headers, get_connector, is_non_listing_artifact, parse_listing_availability, safe_cookie_header, validate_public_fetch_host, validate_public_request, PublicHTTPTransport
 from .database import connect, encode_list, ensure_default_watchlist, init_db, row_to_listing, row_to_profile, utc_now
 from .filters import FilterResult, apply_filters
 from .notifier import TelegramNotifier, WebhookNotifier
 from .schemas import AccountProfilePayload, InquiryPayload, ListingStatusPayload, LoginPayload, PasswordPayload, ProfilePayload, SearchDraftPayload, SettingsPayload, SetupPayload, UserPayload, UserUpdatePayload, WatchlistPayload
 from .version import APP_VERSION, version_payload
+from .price_comparison import compare_new_prices
+from .efficiency import BoundedCache, search_key, assessment_key
+from .delivery import enqueue, delivery_loop
+from .duplicates import duplicate_score
+
+search_cache = BoundedCache(120, 64)
+thumbnail_cache = BoundedCache(600, 256, 32 * 1024 * 1024)
 
 app = FastAPI(title="MarketPlaceLens", version=APP_VERSION)
 static_dir = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 open_check_state = {"running": False, "last_started": 0.0}
 open_check_lock = asyncio.Lock()
+login_attempts: dict[str, deque] = {}
+login_lock = asyncio.Lock()
+logger = logging.getLogger(__name__)
+
+
+async def limit_login(request: Request) -> None:
+    # Use the ASGI peer address, not an arbitrary forwarded header.
+    now = time.monotonic()
+    peer = request.client.host if request.client else "unknown"
+    async with login_lock:
+        for key in list(login_attempts):
+            if not login_attempts[key] or now - login_attempts[key][-1] >= 300:
+                del login_attempts[key]
+        if peer not in login_attempts and len(login_attempts) >= 4096:
+            raise HTTPException(429, "Too many login attempts", headers={"Retry-After": "300"})
+        attempts = login_attempts.setdefault(peer, deque())
+        while attempts and now - attempts[0] >= 300:
+            attempts.popleft()
+        if len(attempts) >= 10:
+            raise HTTPException(429, "Too many login attempts", headers={"Retry-After": "300"})
+        attempts.append(now)
 
 
 @app.middleware("http")
@@ -44,7 +74,11 @@ async def require_session(request: Request, call_next):
     user = current_user_from_session(request.cookies.get(COOKIE_NAME))
     request.state.user = user
     if public or user:
-        return await call_next(request)
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
+        return response
     if path.startswith("/api/"):
         return JSONResponse({"detail": "Not authenticated"}, status_code=401)
     return RedirectResponse("/login", status_code=303)
@@ -53,6 +87,7 @@ async def require_session(request: Request, call_next):
 @app.on_event("startup")
 async def startup() -> None:
     init_db()
+    asyncio.create_task(delivery_loop())
     if settings.poll_enabled:
         asyncio.create_task(poll_loop())
 
@@ -92,6 +127,10 @@ async def setup(payload: SetupPayload) -> dict[str, bool]:
     if not username:
         raise HTTPException(400, "Username is required")
     with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        completed = db.execute("SELECT value FROM app_settings WHERE key = 'setup_complete'").fetchone()
+        if completed and completed["value"] == "1":
+            raise HTTPException(400, "Initial setup is already complete")
         row = db.execute("SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1").fetchone()
         if row:
             db.execute(
@@ -120,8 +159,10 @@ async def setup(payload: SetupPayload) -> dict[str, bool]:
 
 
 @app.post("/api/auth/login")
-async def login(payload: LoginPayload, response: Response) -> dict[str, bool]:
-    if not valid_credentials(payload.username, payload.password):
+async def login(payload: LoginPayload, response: Response, request: Request) -> dict[str, bool]:
+    await limit_login(request)
+    if payload.password.lower() == "admin" or not await asyncio.to_thread(valid_credentials, payload.username, payload.password):
+        logger.warning("Failed authentication attempt")
         raise HTTPException(401, "Invalid login")
     with connect() as db:
         db.execute("UPDATE users SET last_login_at = ? WHERE username = ?", (utc_now(), payload.username))
@@ -130,14 +171,16 @@ async def login(payload: LoginPayload, response: Response) -> dict[str, bool]:
         create_session(payload.username),
         httponly=True,
         samesite="lax",
+        secure=settings.cookie_secure or request.url.scheme == "https",
         max_age=60 * 60 * 24 * 14,
     )
     return {"ok": True}
 
 
 @app.post("/api/auth/logout")
-async def logout(response: Response) -> dict[str, bool]:
-    response.delete_cookie(COOKIE_NAME)
+async def logout(response: Response, request: Request) -> dict[str, bool]:
+    revoke_session(request.cookies.get(COOKIE_NAME))
+    response.delete_cookie(COOKIE_NAME, secure=settings.cookie_secure or request.url.scheme == "https", httponly=True, samesite="lax")
     return {"ok": True}
 
 
@@ -190,9 +233,9 @@ def setup_required() -> bool:
         return False
     if not admin:
         return True
-    if setup_row and setup_row["value"] == "1":
-        return False
-    return valid_credentials(admin["username"], "admin")
+    # An existing administrator must use the authenticated password-change
+    # flow or container reset CLI; never reopen public setup for an existing account.
+    return False
 
 
 @app.get("/api/users")
@@ -255,6 +298,8 @@ async def update_user(user_id: int, payload: UserUpdatePayload, request: Request
             values.append(hash_password(payload.password))
         values.append(user_id)
         db.execute(f"UPDATE users SET {', '.join(updates)} WHERE id = ?", values)
+        if not payload.enabled or payload.password:
+            db.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user_id,))
         updated = db.execute(
             "SELECT id, username, role, enabled, created_at, updated_at, last_login_at FROM users WHERE id = ?",
             (user_id,),
@@ -592,7 +637,7 @@ async def list_listings(
             {where}
             """,
             values,
-        ).fetchone()["count"]
+        ).fetchone()["count"] if paged else None
         rows = db.execute(
             f"""
             SELECT listings.*, watch_profiles.name profile_name
@@ -653,6 +698,81 @@ async def update_listing_status(listing_id: int, payload: ListingStatusPayload, 
     return attach_watchlists([row_to_listing(row)])[0]
 
 
+@app.put("/api/listings/{listing_id}/target-price")
+async def set_target_price(listing_id: int, request: Request) -> dict[str, Any]:
+    user = request_user(request)
+    payload = await request.json()
+    raw = payload.get("target_price")
+    try:
+        target = None if raw is None else float(raw)
+        if target is not None and not 0 <= target <= 100000000:
+            raise ValueError()
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Invalid target price")
+    with connect() as db:
+        if not can_access_listing(db, listing_id, user):
+            raise HTTPException(404, "Listing not found")
+        db.execute("UPDATE listings SET target_price = ? WHERE id = ?", (target, listing_id))
+    return {"target_price": target}
+
+
+@app.get("/api/listings/{listing_id}/new-price-comparison")
+async def listing_new_price_comparison(listing_id: int, request: Request) -> dict[str, Any]:
+    user = request_user(request)
+    with connect() as db:
+        if not can_access_listing(db, listing_id, user):
+            raise HTTPException(404, "Listing not found")
+        row = db.execute("SELECT title FROM listings WHERE id = ?", (listing_id,)).fetchone()
+    return await compare_new_prices(row["title"])
+
+
+@app.get("/api/connector-health")
+async def connector_health(request: Request) -> list[dict[str, Any]]:
+    require_admin(request)
+    with connect() as db:
+        return [dict(row) for row in db.execute("""SELECT p.source_type, COUNT(*) AS runs,
+            SUM(r.status = 'success') AS successful, SUM(r.status = 'error') AS failed,
+            MAX(CASE WHEN r.status = 'success' THEN r.finished_at END) AS last_success,
+            ROUND(AVG((julianday(r.finished_at) - julianday(r.started_at)) * 86400), 2) AS average_seconds
+            FROM run_logs r JOIN watch_profiles p ON p.id = r.profile_id
+            GROUP BY p.source_type""").fetchall()]
+
+
+@app.get("/api/listings/{listing_id}/possible-duplicates")
+async def possible_duplicates(listing_id: int, request: Request) -> list[dict[str, Any]]:
+    user = request_user(request)
+    with connect() as db:
+        if not can_access_listing(db, listing_id, user):
+            raise HTTPException(404, "Listing not found")
+        listing = db.execute("SELECT * FROM listings WHERE id = ?", (listing_id,)).fetchone()
+        if listing["price_value"] is None or not listing["location_text"]:
+            return []
+        price = listing["price_value"]
+        tolerance = max(2, 0.06 * price)
+        clause, values = profile_owner_filter(user)
+        rows = db.execute(
+            "SELECT listings.id, title, listings.source_type, location_text, price_value, listing_url FROM listings "
+            "JOIN watch_profiles ON watch_profiles.id = listings.profile_id "
+            "WHERE listings.source_type != ? AND price_value BETWEEN ? AND ? AND user_hidden = 0 "
+            + (" AND " + clause if clause else "") + " ORDER BY last_seen_at DESC LIMIT 500",
+            [listing["source_type"], price-tolerance, price+tolerance, *values]).fetchall()
+    matches = []
+    for row in rows:
+        score = duplicate_score(listing, row)
+        if score >= 0.85:
+            matches.append({**dict(row), "confidence": round(score, 2)})
+    return sorted(matches, key=lambda item: item["confidence"], reverse=True)[:10]
+
+
+@app.get("/api/listings/{listing_id}/price-history")
+async def listing_price_history(listing_id: int, request: Request) -> list[dict[str, Any]]:
+    user = request_user(request)
+    with connect() as db:
+        if not can_access_listing(db, listing_id, user):
+            raise HTTPException(404, "Listing not found")
+        return [dict(row) for row in db.execute("SELECT price_value, observed_at FROM listing_price_history WHERE listing_id = ? ORDER BY observed_at DESC, id DESC LIMIT 100", (listing_id,)).fetchall()]
+
+
 @app.get("/api/listings/{listing_id}/image")
 async def listing_image(listing_id: int, request: Request) -> Response:
     user = request_user(request)
@@ -666,24 +786,39 @@ async def listing_image(listing_id: int, request: Request) -> Response:
     if not image_url:
         raise HTTPException(404, "Listing has no image")
     validate_remote_image_url(image_url)
+    cached = thumbnail_cache.get(image_url)
+    if cached:
+        data, content_type = cached
+        return Response(content=data, media_type=content_type, headers={"Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; sandbox"})
     parsed = urlparse(image_url)
     async with httpx.AsyncClient(
         headers={
             "User-Agent": settings.user_agent,
-            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            "Accept": "image/avif,image/webp,image/apng,image/png,image/jpeg,image/gif",
             "Referer": f"{parsed.scheme}://{parsed.netloc}/",
         },
         follow_redirects=True,
+        max_redirects=5,
+        trust_env=False,
+        transport=PublicHTTPTransport(),
+        event_hooks={"request": [validate_public_request]},
         timeout=20.0,
     ) as client:
-        response = await client.get(image_url)
-        response.raise_for_status()
-    content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
-    if not content_type.startswith("image/"):
-        raise HTTPException(502, "Remote URL did not return an image")
-    if len(response.content) > 5 * 1024 * 1024:
-        raise HTTPException(502, "Remote image is too large")
-    return Response(content=response.content, media_type=content_type)
+        try:
+            async with client.stream("GET", image_url) as response:
+                response.raise_for_status()
+                content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
+                if content_type not in {"image/jpeg", "image/png", "image/gif", "image/webp", "image/avif", "image/apng"}:
+                    raise HTTPException(502, "Unsupported remote image type")
+                data = bytearray()
+                async for chunk in response.aiter_bytes(chunk_size=65536):
+                    if len(data) + len(chunk) > 5 * 1024 * 1024:
+                        raise HTTPException(502, "Remote image is too large")
+                    data.extend(chunk)
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, "Remote image unavailable") from exc
+    thumbnail_cache.put(image_url, (bytes(data), content_type), len(data))
+    return Response(content=bytes(data), media_type=content_type, headers={"Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; sandbox"})
 
 
 @app.post("/api/listings/{listing_id}/inquiry")
@@ -742,13 +877,17 @@ async def generate_listing_assessment(listing_id: int, request: Request) -> dict
     if app_settings.get("ai_listing_assessments_enabled") != "1":
         raise HTTPException(400, "AI listing assessments are not enabled")
     listing = row_to_listing(listing_row)
-    text = await generate_ai_text(app_settings, listing_assessment_prompt(listing), max_tokens=180)
+    messages = listing_assessment_prompt(listing)
+    key = assessment_key(app_settings, messages)
+    if listing.get("ai_assessment_key") == key and listing.get("ai_assessment_text"):
+        return {"text": listing["ai_assessment_text"], "assessed_at": listing["ai_assessed_at"]}
+    text = await generate_ai_text(app_settings, messages, max_tokens=180)
     assessed_at = utc_now()
     cleaned = text.strip()
     with connect() as db:
         db.execute(
-            "UPDATE listings SET ai_assessment_text = ?, ai_assessed_at = ? WHERE id = ?",
-            (cleaned, assessed_at, listing_id),
+            "UPDATE listings SET ai_assessment_text = ?, ai_assessed_at = ?, ai_assessment_key = ? WHERE id = ?",
+            (cleaned, assessed_at, key, listing_id),
         )
     return {"text": cleaned, "assessed_at": assessed_at}
 
@@ -792,8 +931,8 @@ async def get_settings(request: Request) -> dict[str, Any]:
     return {
         "telegram_bot_token": mask_secret(values.get("telegram_bot_token", "")),
         "telegram_bot_token_set": bool(values.get("telegram_bot_token")),
-        "telegram_chat_id": values.get("telegram_chat_id", ""),
-        "webhook_url": values.get("webhook_url", ""),
+        "telegram_chat_id": values.get("telegram_chat_id", "") if user.get("role") == "admin" else "",
+        "webhook_url": mask_secret(values.get("webhook_url", "")),
         "webhook_url_set": bool(values.get("webhook_url")),
         "global_rate_limit_seconds": int(values.get("global_rate_limit_seconds", "20") or 20),
         "default_watchlist_id": default_watchlist_id,
@@ -804,7 +943,7 @@ async def get_settings(request: Request) -> dict[str, Any]:
         "ai_provider": values.get("ai_provider", "openai") or "openai",
         "ai_api_key": mask_secret(values.get("ai_api_key", "")),
         "ai_api_key_set": bool(values.get("ai_api_key")),
-        "ai_base_url": values.get("ai_base_url", ""),
+        "ai_base_url": values.get("ai_base_url", "") if user.get("role") == "admin" else "",
         "ai_model": values.get("ai_model", "gpt-4o-mini") or "gpt-4o-mini",
         "ai_tone": values.get("ai_tone", "normal") or "normal",
         "facebook_cookie_header": mask_secret(values.get("facebook_cookie_header", "")),
@@ -819,13 +958,14 @@ async def update_settings(payload: SettingsPayload, request: Request) -> dict[st
         user_default_id = valid_watchlist_id(db, payload.default_watchlist_id)
         db.execute("UPDATE users SET default_watchlist_id = ?, updated_at = ? WHERE id = ?", (user_default_id, utc_now(), user["id"]))
         if user.get("role") == "admin":
+            current_webhook = get_setting(db, "webhook_url")
             current_token = get_setting(db, "telegram_bot_token")
             current_ai_key = get_setting(db, "ai_api_key")
             current_facebook_cookie = get_setting(db, "facebook_cookie_header")
             values = {
                 "telegram_bot_token": current_token if payload.telegram_bot_token == "********" else payload.telegram_bot_token,
                 "telegram_chat_id": payload.telegram_chat_id,
-                "webhook_url": payload.webhook_url,
+                "webhook_url": current_webhook if payload.webhook_url == "********" else payload.webhook_url,
                 "global_rate_limit_seconds": str(payload.global_rate_limit_seconds),
                 "ai_enabled": "1" if payload.ai_enabled else "0",
                 "ai_listing_assessments_enabled": "1" if payload.ai_listing_assessments_enabled else "0",
@@ -918,7 +1058,30 @@ async def test_webhook(request: Request) -> dict[str, bool]:
     return {"ok": True}
 
 
+active_profile_runs: set[int] = set()
+marketplace_run_lock = asyncio.Lock()
+last_marketplace_run = 0.0
+
+
 async def run_profile(profile_id: int) -> dict[str, Any]:
+    global last_marketplace_run
+    if profile_id in active_profile_runs:
+        return {"profile_id": profile_id, "skipped": True, "reason": "already_running"}
+    active_profile_runs.add(profile_id)
+    try:
+        async with marketplace_run_lock:
+            delay = get_global_rate_limit() - (time.monotonic() - last_marketplace_run)
+            if delay > 0:
+                await asyncio.sleep(delay)
+            try:
+                return await _run_profile(profile_id)
+            finally:
+                last_marketplace_run = time.monotonic()
+    finally:
+        active_profile_runs.discard(profile_id)
+
+
+async def _run_profile(profile_id: int) -> dict[str, Any]:
     started_at = utc_now()
     with connect() as db:
         row = db.execute("SELECT * FROM watch_profiles WHERE id = ?", (profile_id,)).fetchone()
@@ -926,12 +1089,22 @@ async def run_profile(profile_id: int) -> dict[str, Any]:
     if not row:
         raise HTTPException(404, "Profile not found")
     profile = row_to_profile(row)
+    if profile.get("retry_after"):
+        try:
+            if datetime.fromisoformat(profile["retry_after"]) > datetime.now(UTC):
+                return {"profile_id": profile_id, "skipped": True, "reason": "retry_backoff", "retry_after": profile["retry_after"]}
+        except ValueError:
+            pass
     app_settings = {item["key"]: item["value"] for item in settings_rows}
     if profile["source_type"] == "facebook":
         profile["facebook_cookie_header"] = app_settings.get("facebook_cookie_header", "")
     connector = get_connector(profile["source_type"])
     try:
-        candidates = await connector.fetch_listings(profile)
+        key = search_key(profile)
+        candidates = search_cache.get(key)
+        if candidates is None:
+            candidates = await connector.fetch_listings(profile)
+            search_cache.put(key, candidates)
     except Exception as exc:  # Manual runs should surface connector failures directly.
         with connect() as db:
             record_run(
@@ -940,12 +1113,13 @@ async def run_profile(profile_id: int) -> dict[str, Any]:
                 "error",
                 {"fetched": 0, "new": 0, "hidden": 0, "duplicates": 0, "notified": 0},
                 started_at,
-                str(exc),
+                type(exc).__name__,
             )
-        raise HTTPException(502, f"Connector failed: {exc}") from exc
+            failures = min(10, int(profile.get("consecutive_failures") or 0) + 1)
+            retry_after = (datetime.now(UTC) + timedelta(minutes=min(360, max(5, int(profile["poll_interval_minutes"])) * (2 ** (failures - 1))))).isoformat()
+            db.execute("UPDATE watch_profiles SET last_run_at = ?, consecutive_failures = ?, retry_after = ? WHERE id = ?", (utc_now(), failures, retry_after, profile_id))
+        raise HTTPException(502, "Marketplace connector failed") from exc
 
-    notifier = TelegramNotifier(app_settings.get("telegram_bot_token", ""), app_settings.get("telegram_chat_id", ""))
-    webhook = WebhookNotifier(app_settings.get("webhook_url", ""))
     stats = {"fetched": len(candidates), "new": 0, "hidden": 0, "duplicates": 0, "notified": 0}
     now = utc_now()
     with connect() as db:
@@ -957,6 +1131,15 @@ async def run_profile(profile_id: int) -> dict[str, Any]:
             if existing:
                 updates = ["last_seen_at = ?", "availability_status = ?", "availability_checked_at = ?"]
                 values: list[Any] = [now, "active", now]
+                if candidate.price_value is not None and existing["price_value"] != candidate.price_value:
+                    if existing["price_value"] is not None and not db.execute("SELECT 1 FROM listing_price_history WHERE listing_id = ? LIMIT 1", (existing["id"],)).fetchone():
+                        db.execute("INSERT INTO listing_price_history(listing_id, price_value, observed_at) VALUES (?, ?, ?)", (existing["id"], existing["price_value"], existing["last_seen_at"]))
+                    db.execute("INSERT INTO listing_price_history(listing_id, price_value, observed_at) VALUES (?, ?, ?)", (existing["id"], candidate.price_value, now))
+                    updates.extend(["ai_assessment_text = ?", "ai_assessed_at = ?"])
+                    values.extend(["", None])
+                    target = existing["target_price"]
+                    if target is not None and existing["price_value"] is not None and existing["price_value"] > target >= candidate.price_value and not existing["user_hidden"]:
+                        enqueue(db, profile, existing["id"], app_settings, "Target price reached", "target:" + str(target) + ":" + now)
                 refresh_existing_listing_fields(existing, candidate, updates, values)
                 if not bool(existing["user_hidden"]):
                     result = apply_filters(candidate, profile)
@@ -974,42 +1157,29 @@ async def run_profile(profile_id: int) -> dict[str, Any]:
             result = apply_listing_age_limit(candidate, profile, result)
             status = result.status
             listing_id = insert_listing(db, profile["id"], candidate, status, result.score, result.reason, now)
+            if candidate.price_value is not None:
+                db.execute("INSERT INTO listing_price_history(listing_id, price_value, observed_at) VALUES (?, ?, ?)", (listing_id, candidate.price_value, now))
             listing = db.execute("SELECT * FROM listings WHERE id = ?", (listing_id,)).fetchone()
             if status == "hidden":
                 stats["hidden"] += 1
                 continue
             stats["new"] += 1
             db.commit()
-            if should_auto_assess_new_listing(app_settings):
+            if should_auto_assess_new_listing(app_settings) and stats["new"] <= 5:
                 try:
-                    assessment_text = await generate_ai_text(app_settings, listing_assessment_prompt(row_to_listing(listing)), max_tokens=220)
+                    messages = listing_assessment_prompt(row_to_listing(listing))
+                    assessment_text = await generate_ai_text(app_settings, messages, max_tokens=220)
                     assessed_at = utc_now()
                     db.execute(
-                        "UPDATE listings SET ai_assessment_text = ?, ai_assessed_at = ? WHERE id = ?",
-                        (assessment_text.strip()[:1200], assessed_at, listing_id),
+                        "UPDATE listings SET ai_assessment_text = ?, ai_assessed_at = ?, ai_assessment_key = ? WHERE id = ?",
+                        (assessment_text.strip()[:1200], assessed_at, assessment_key(app_settings, messages), listing_id),
                     )
                     db.commit()
                     listing = db.execute("SELECT * FROM listings WHERE id = ?", (listing_id,)).fetchone()
                 except HTTPException:
                     pass
-            delivered = False
-            if profile["notify_telegram"] and notifier.configured:
-                try:
-                    await notifier.send_listing(row_to_listing(listing), profile, result.matched_reason)
-                    delivered = True
-                except Exception:
-                    pass
-            if profile["notify_webhook"] and webhook.configured:
-                try:
-                    await webhook.send_listing(row_to_listing(listing), profile, result.matched_reason)
-                    delivered = True
-                except Exception:
-                    pass
-            if delivered:
-                db.execute("UPDATE listings SET status = 'notified', notified_at = ? WHERE id = ?", (utc_now(), listing_id))
-                db.commit()
-                stats["notified"] += 1
-        db.execute("UPDATE watch_profiles SET last_run_at = ?, updated_at = ? WHERE id = ?", (now, now, profile_id))
+            enqueue(db, profile, listing_id, app_settings, result.matched_reason)
+        db.execute("UPDATE watch_profiles SET last_run_at = ?, updated_at = ?, consecutive_failures = 0, retry_after = NULL WHERE id = ?", (now, now, profile_id))
     stats.update(await verify_unseen_listing_availability(profile, app_settings, now))
     with connect() as db:
         record_run(db, profile, "success", stats, started_at, "")
@@ -1030,16 +1200,19 @@ async def verify_unseen_listing_availability(
             WHERE profile_id = ?
               AND user_hidden = 0
               AND status IN ('new', 'notified')
-            ORDER BY first_seen_at DESC
+              AND last_seen_at < ?
+              AND (availability_checked_at IS NULL OR datetime(availability_checked_at) <= datetime(?, '-6 hours'))
+            ORDER BY availability_checked_at ASC, first_seen_at DESC
+            LIMIT 20
             """,
-            (profile["id"],),
+            (profile["id"], now, now),
         ).fetchall()
     if not rows:
         return stats
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-            if profile["source_type"] in {"facebook", "mobilede"}
+            if profile["source_type"] in {"facebook", "mobilede", "marktplaats"}
             else settings.user_agent
         ),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -1051,7 +1224,7 @@ async def verify_unseen_listing_availability(
     if profile["source_type"] == "facebook" and facebook_cookie:
         headers["Cookie"] = facebook_cookie
     updates: list[tuple[str, str, int]] = []
-    async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=12.0) as client:
+    async with httpx.AsyncClient(headers=headers, follow_redirects=True, max_redirects=5, trust_env=False, transport=PublicHTTPTransport(), event_hooks={"request": [validate_public_request]}, timeout=12.0) as client:
         for row in rows:
             availability = "unknown"
             try:
@@ -1064,6 +1237,12 @@ async def verify_unseen_listing_availability(
                 )
             except httpx.HTTPError:
                 availability = "unknown"
+            if availability == "unknown":
+                # Transient failures do not overwrite a previously known state.
+                with connect() as db:
+                    db.execute("UPDATE listings SET availability_checked_at = ? WHERE id = ?", (now, row["id"]))
+                stats["availability_checked"] += 1
+                continue
             updates.append((availability, now, row["id"]))
             stats["availability_checked"] += 1
             if availability == "deleted":
@@ -1084,8 +1263,11 @@ async def poll_loop() -> None:
         try:
             due_profiles = get_due_profiles()
             for profile in due_profiles:
-                await run_profile(profile["id"])
-                await asyncio.sleep(max(get_global_rate_limit(), random.randint(8, 18)))
+                try:
+                    await run_profile(profile["id"])
+                except Exception:
+                    logger.warning("Scheduled marketplace job failed (profile %s)", profile["id"])
+                await asyncio.sleep(1)
         except Exception:
             pass
         await asyncio.sleep(60)
@@ -1097,6 +1279,7 @@ def get_due_profiles() -> list[dict[str, Any]]:
             """
             SELECT * FROM watch_profiles
             WHERE enabled = 1
+              AND (retry_after IS NULL OR datetime(retry_after) <= datetime('now'))
               AND (
                 last_run_at IS NULL OR
                 datetime(last_run_at) <= datetime('now', '-' || poll_interval_minutes || ' minutes')
@@ -1521,8 +1704,8 @@ def search_draft_prompt(prompt: str, language: str) -> list[dict[str, str]]:
             "content": (
                 "You convert one natural-language marketplace search wish into a structured job draft. "
                 "Return only one JSON object, without markdown or explanations. "
-                "Allowed source_type values: kleinanzeigen, facebook, mobilede. "
-                "Use kleinanzeigen unless the user clearly asks for Facebook Marketplace, mobile.de, cars, or vehicles. "
+                "Allowed source_type values: kleinanzeigen, facebook, mobilede, marktplaats. "
+                "Use kleinanzeigen unless the user clearly asks for Facebook Marketplace, mobile.de, cars, vehicles, or Marktplaats. "
                 "Keep query to the product/search words only; put prices, radius, location, and listing age only in their fields. "
                 "For Kleinanzeigen category_hint, prefer a precise category path such as 'Elektronik > Notebooks' for laptops. "
                 "Use null for unknown numeric values and [] for empty keyword arrays."
@@ -1550,7 +1733,7 @@ def normalize_search_draft(text: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise HTTPException(502, "AI provider did not return a valid search draft")
     source_type = str(data.get("source_type") or "kleinanzeigen").strip().lower()
-    if source_type not in {"kleinanzeigen", "facebook", "mobilede"}:
+    if source_type not in {"kleinanzeigen", "facebook", "mobilede", "marktplaats"}:
         source_type = "kleinanzeigen"
     query = clean_ai_string(data.get("query")) or clean_ai_string(data.get("name"))
     if not query:
@@ -1684,10 +1867,9 @@ async def generate_ai_text(app_settings: dict[str, str], messages: list[dict[str
             )
             response.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        detail = exc.response.text[:500] if exc.response is not None else str(exc)
-        raise HTTPException(502, f"AI provider request failed: {detail}") from exc
+        raise HTTPException(502, f"AI provider request failed (HTTP {exc.response.status_code})") from exc
     except httpx.HTTPError as exc:
-        raise HTTPException(502, f"AI provider is unreachable: {exc}") from exc
+        raise HTTPException(502, "AI provider is unreachable") from exc
     data = response.json()
     try:
         content = data["choices"][0]["message"]["content"]
@@ -1767,10 +1949,10 @@ def refresh_existing_listing_fields(
         ("thumbnail_url", candidate.thumbnail_url),
     ]
     for field, value in fill_fields:
-        if value and not existing[field]:
+        if value and (not existing[field] or (field == "price_text" and candidate.price_value is not None and value != existing[field])):
             updates.append(f"{field} = ?")
             values.append(value)
-    if candidate.price_value is not None and existing["price_value"] is None:
+    if candidate.price_value is not None and existing["price_value"] != candidate.price_value:
         updates.append("price_value = ?")
         values.append(candidate.price_value)
     if candidate.content_hash and candidate.content_hash != existing["content_hash"]:

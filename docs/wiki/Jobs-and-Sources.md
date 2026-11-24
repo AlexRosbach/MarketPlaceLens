@@ -17,6 +17,7 @@ Use the manual editor for precise marketplace URLs. It supports provider cards, 
 | Kleinanzeigen | Stable primary path | Supports public search/category URLs, listing type, price, keyword, age, location, and radius filters. |
 | Facebook Marketplace | **In testing** | Facebook can return login, consent, location, or JavaScript shell pages to server requests. Optional Cookie headers may help when used privately. |
 | mobile.de | **In testing** | Uses public search pages when embedded result data is visible to the server. Official API access is separate. |
+| Marktplaats.nl | **In testing** | Uses public Dutch search result URLs such as `https://www.marktplaats.nl/l/fietsen-en-brommers/q/fiets/`. Login, CAPTCHA, rate limits, and platform access controls are not bypassed. |
 | Generic HTML | Experimental | Basic parsing for simple link-card pages. |
 
 ## Location Handling

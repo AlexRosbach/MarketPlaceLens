@@ -122,8 +122,8 @@ class ListingRefreshTests(unittest.TestCase):
 
         refresh_existing_listing_fields(existing, candidate(), updates, values)
 
-        self.assertEqual(updates, [])
-        self.assertEqual(values, [])
+        self.assertEqual(updates, ["price_text = ?", "price_value = ?"])
+        self.assertEqual(values, ["25 EUR VB", 25.0])
         db.close()
 
 

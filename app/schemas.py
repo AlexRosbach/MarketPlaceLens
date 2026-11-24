@@ -60,8 +60,8 @@ class SettingsPayload(BaseModel):
 
 
 class LoginPayload(BaseModel):
-    username: str
-    password: str
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=200)
 
 
 class SetupPayload(BaseModel):

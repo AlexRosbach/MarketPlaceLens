@@ -202,6 +202,7 @@ const translations = {
     "source.kleinanzeigenHelp": "Paste a public Kleinanzeigen search URL.",
     "source.facebookHelp": "Use a Marketplace search/category URL. The Facebook settings guide helps with browser sessions.",
     "source.mobiledeHelp": "Paste a public mobile.de search result URL.",
+    "source.marktplaatsHelp": "Paste a public Marktplaats.nl search result URL.",
     "source.generic": "Generic HTML",
     "source.genericHelp": "Use a simple listing result page.",
     "jobSummary.nameMissing": "Name missing",
@@ -561,6 +562,7 @@ const translations = {
     "source.kleinanzeigenHelp": "Öffentliche Kleinanzeigen-Such-URL einfügen.",
     "source.facebookHelp": "Marketplace-Suche oder Kategorie-URL einfügen. Die Facebook-Anleitung in den Einstellungen hilft bei Browser-Sessions.",
     "source.mobiledeHelp": "Öffentliche mobile.de-Suchergebnis-URL einfügen.",
+    "source.marktplaatsHelp": "Öffentliche Marktplaats.nl-Suchergebnis-URL einfügen.",
     "source.generic": "Generic HTML",
     "source.genericHelp": "Einfache Listing-Ergebnisseite verwenden.",
     "jobSummary.nameMissing": "Name fehlt",
@@ -812,6 +814,11 @@ const providerCategories = {
     { label: "Cars", path: "fahrzeuge/auto/search.html" },
     { label: "Used cars", path: "auto/gebrauchtwagen.html" },
   ],
+  marktplaats: [
+    { label: "Bikes & mopeds", path: "fietsen-en-brommers" },
+    { label: "Cars", path: "auto-s" },
+    { label: "Computers & software", path: "computers-en-software" },
+  ],
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -1023,6 +1030,8 @@ function showView(view) {
   }[view]);
   if (view === "listings") loadListings();
   if (view === "watchlist") loadWatchlist();
+  if (view === "review") loadReviewQueue();
+  if (view === "settings") Promise.all([loadSettings(), loadAccountProfile(), loadUsers()]).catch(error => toast(errorMessage(error)));
 }
 
 function showWizard(visible) {
@@ -1099,7 +1108,11 @@ function validateWizardStep(step) {
 async function refreshAll() {
   try {
     await loadAuthStatus();
-    await Promise.all([loadVersion(), loadSummary(), loadProfiles(), loadListings(), loadWatchlist(), loadReviewQueue(), loadSettings(), loadAccountProfile(), loadUsers()]);
+    await Promise.all([loadVersion(), loadSummary(), loadProfiles(), loadSettings()]);
+    if (state.currentView === "listings") await loadListings();
+    if (state.currentView === "watchlist") await loadWatchlist();
+    if (state.currentView === "review") await loadReviewQueue();
+    if (state.currentView === "settings") await Promise.all([loadAccountProfile(), loadUsers()]);
   } catch (error) {
     if (String(error.message).includes("Not authenticated") || String(error.message).includes("401")) {
       window.location.href = "/login";
@@ -1193,6 +1206,7 @@ async function logout() {
 
 async function loadSummary() {
   const summary = await api("/api/summary");
+  const health = isAdmin() ? await api("/api/connector-health").catch(() => []) : [];
   $("#summary-active").textContent = `${summary.profiles_enabled}/${summary.profiles_total}`;
   $("#summary-new").textContent = summary.listings_new;
   $("#summary-watchlisted").textContent = summary.listings_watchlisted;
@@ -1220,6 +1234,7 @@ async function loadSummary() {
         <span class="source-badge ${escapeAttribute(source.source_type)}">${escapeHtml(sourceLabel(source.source_type))}</span>
         <strong>${source.profile_count || 0}</strong>
         <p class="meta">${escapeHtml(t("profiles.title"))} · ${source.listing_count || 0} ${escapeHtml(t("nav.listings"))}</p>
+        ${health.filter(item => item.source_type === source.source_type).map(item => `<p class="meta">${item.successful}/${item.runs} ${state.language === "de" ? "erfolgreich" : "successful"} · Ø ${item.average_seconds ?? "–"} s · ${escapeHtml(item.last_success || "–")}</p>`).join("")}
       </article>
     `).join("")
     : `<article><strong>${escapeHtml(t("empty.noProfiles"))}</strong><p class="meta">${escapeHtml(t("empty.noProfilesHint"))}</p></article>`;
@@ -1264,7 +1279,7 @@ async function loadProfiles() {
 }
 
 function groupedProfilesMarkup(profiles) {
-  const order = ["kleinanzeigen", "facebook", "mobilede", "html"];
+  const order = ["kleinanzeigen", "facebook", "mobilede", "marktplaats", "html"];
   return order.map((source) => {
     const items = profiles.filter((profile) => profile.source_type === source);
     return `
@@ -1290,6 +1305,7 @@ function sourceLabel(source) {
     kleinanzeigen: "Kleinanzeigen",
     facebook: "Facebook Marketplace (in testing)",
     mobilede: "mobile.de (in testing)",
+    marktplaats: "Marktplaats.nl (in testing)",
     html: "Generic HTML",
   }[source] || source;
 }
@@ -1303,6 +1319,7 @@ function sourceBaseUrls() {
     kleinanzeigen: "https://www.kleinanzeigen.de/s-suchanfrage.html?keywords=",
     facebook: "https://www.facebook.com/marketplace/search/?query=",
     mobilede: "https://suchen.mobile.de/fahrzeuge/auto/search.html?ft=",
+    marktplaats: "https://www.marktplaats.nl/q/",
     html: "",
   };
 }
@@ -1401,6 +1418,7 @@ function parseSearchUrlParameters(value) {
   if (host.includes("kleinanzeigen.de")) return parseKleinanzeigenUrl(url);
   if (host === "facebook.com" || host.endsWith(".facebook.com")) return parseFacebookMarketplaceUrl(url);
   if (host === "mobile.de" || host.endsWith(".mobile.de")) return parseMobileDeUrl(url);
+  if (host === "marktplaats.nl" || host.endsWith(".marktplaats.nl")) return parseMarktplaatsUrl(url);
   return {};
 }
 
@@ -1437,6 +1455,14 @@ function parseMobileDeUrl(url) {
     query: humanizeUrlTerm(url.searchParams.get("ft") || url.searchParams.get("q") || ""),
     category,
   };
+}
+
+function parseMarktplaatsUrl(url) {
+  const segments = url.pathname.split("/").filter(Boolean).map((part) => decodeURIComponent(part));
+  const queryIndex = segments.indexOf("q");
+  const query = queryIndex >= 0 ? segments[queryIndex + 1] || "" : "";
+  const category = providerCategories.marktplaats.find((item) => segments.includes(item.path))?.label || "";
+  return { source: "marktplaats", query: humanizeUrlTerm(query), category };
 }
 
 function keywordFromKleinanzeigenSegments(segments) {
@@ -1929,7 +1955,7 @@ async function createWizardDraftWithAi() {
 }
 
 function applyWizardDraft(draft) {
-  const source = ["kleinanzeigen", "facebook", "mobilede"].includes(draft.source_type) ? draft.source_type : "kleinanzeigen";
+  const source = ["kleinanzeigen", "facebook", "mobilede", "marktplaats"].includes(draft.source_type) ? draft.source_type : "kleinanzeigen";
   $("#wizard-source").value = source;
   updateWizardCategories();
   const category = matchWizardCategory(source, draft.category_hint || "");
@@ -2013,6 +2039,10 @@ function buildWizardSearchUrl(source, query, category, kleinanzeigenTypes = sele
   if (source === "mobilede") {
     const path = category?.path || "fahrzeuge/auto/search.html";
     return `https://suchen.mobile.de/${path}?ft=${encodeURIComponent(query)}`;
+  }
+  if (source === "marktplaats") {
+    const categoryPath = category?.path ? `/l/${category.path}` : "";
+    return `https://www.marktplaats.nl${categoryPath}/q/${keywordUrlPath(query)}/`;
   }
   if (source === "kleinanzeigen" && category?.id && category?.path) {
     return `https://www.kleinanzeigen.de/s-${category.path}${kleinanzeigenTypeSegment(kleinanzeigenTypes)}/${keywordUrlPath(query)}/k0c${category.id}`;
@@ -2149,6 +2179,7 @@ function updateSourcePlaceholder() {
     kleinanzeigen: "https://www.kleinanzeigen.de/...",
     facebook: "https://www.facebook.com/marketplace/search/?query=defekt",
     mobilede: "https://suchen.mobile.de/fahrzeuge/auto/search.html?ft=tesla",
+    marktplaats: "https://www.marktplaats.nl/l/fietsen-en-brommers/q/fiets/",
     html: "https://example.com/search-results",
   }[source] || "https://example.com/search-results";
   updateSourceOptions();
@@ -2261,6 +2292,53 @@ function renderReviewCard() {
   });
 }
 
+function priceToolsMarkup(listing) {
+  const de = state.language === "de";
+  return `<details class="price-tools" data-price-tools data-listing-id="${listing.id}" data-listing-price="${escapeAttribute(listing.price_value ?? "")}">
+    <summary>${de ? "Neupreisvergleich & Preisverlauf" : "New-price comparison & price history"}</summary>
+    <div data-price-content class="meta"></div>
+    <label class="meta">${de ? "Wunschpreis (€)" : "Target price (€)"} <input type="number" min="0" step="0.01" data-target-price value="${escapeAttribute(listing.target_price ?? "")}"></label>
+    <button type="button" class="mini-button" data-save-target>${de ? "Speichern" : "Save"}</button>
+  </details>`;
+}
+
+document.addEventListener("click", async (event) => {
+  const button = event.target.closest?.("[data-save-target]");
+  if (!button) return;
+  const panel = button.closest("[data-price-tools]");
+  const value = panel.querySelector("[data-target-price]").value;
+  try {
+    await api(`/api/listings/${Number(panel.dataset.listingId)}/target-price`, {method:"PUT", body:JSON.stringify({target_price:value === "" ? null : Number(value)})});
+    toast(state.language === "de" ? "Wunschpreis gespeichert" : "Target price saved");
+  } catch { toast(state.language === "de" ? "Wunschpreis konnte nicht gespeichert werden" : "Could not save target price"); }
+});
+
+document.addEventListener("toggle", async (event) => {
+  const panel = event.target;
+  if (!(panel instanceof HTMLDetailsElement) || !panel.matches("[data-price-tools]") || !panel.open || panel.dataset.loaded) return;
+  panel.dataset.loaded = "1";
+  const content = panel.querySelector("[data-price-content]");
+  const de = state.language === "de";
+  content.textContent = de ? "Lade Preise …" : "Loading prices …";
+  try {
+    const id = Number(panel.dataset.listingId);
+    const [comparison, history, duplicates] = await Promise.all([
+      api(`/api/listings/${id}/new-price-comparison`), api(`/api/listings/${id}/price-history`), api(`/api/listings/${id}/possible-duplicates`)
+    ]);
+    const money = (value) => new Intl.NumberFormat(de ? "de-DE" : "en-GB", {style:"currency",currency:"EUR"}).format(value);
+    const localPrice = panel.dataset.listingPrice === "" ? null : Number(panel.dataset.listingPrice);
+    const difference = offer => offer.condition === "new" && offer.match_confidence >= 0.9 && Number.isFinite(localPrice) && localPrice !== null && offer.price > 0 ? ` · ${de ? "Preisabstand vor Versand" : "Price difference before shipping"}: ${escapeHtml(money(offer.price - localPrice))} (${Math.round((offer.price-localPrice)/offer.price*100)}%)` : "";
+    const offers = comparison.offers.map(offer => `<p><a href="${escapeAttribute(safeExternalUrl(offer.url))}" target="_blank" rel="noopener noreferrer">${escapeHtml(offer.provider)} (${offer.condition === "used" ? (de ? "gebraucht" : "used") : (de ? "neu" : "new")}): ${escapeHtml(money(offer.price))}</a> · ${escapeHtml(offer.title)} · ${de ? "Ähnlicher Treffer" : "Possible match"} (${Math.round(offer.match_confidence * 100)}%) · ${offer.shipping === null ? (de ? "Versand unbekannt" : "Shipping unknown") : escapeHtml(money(offer.shipping))}${difference(offer)}</p>`).join("");
+    const links = Object.entries(comparison.links).map(([name, url]) => `<a href="${escapeAttribute(safeExternalUrl(url))}" target="_blank" rel="noopener noreferrer">${escapeHtml(name === "amazon" ? "Amazon" : "eBay")} ${de ? "Suche" : "search"}</a>`).join(" · ");
+    const duplicatesHtml = duplicates.map(item => `<li><a href="${escapeAttribute(safeExternalUrl(item.listing_url))}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.title)}</a> · ${escapeHtml(item.source_type)} · ${Math.round(item.confidence*100)}%</li>`).join("");
+    const historyHtml = history.slice(0, 10).map(entry => `<li>${escapeHtml(money(entry.price_value))} · ${escapeHtml(entry.observed_at)}</li>`).join("");
+    content.innerHTML = `${offers || (de ? "Keine verifizierten Neupreise verfügbar." : "No verified new-item prices available.")}<p>${links}</p>${comparison.fetched_at ? `<p>${escapeHtml(comparison.fetched_at)}</p>` : ""}<p>${comparison.amazon_status === "search_link_only" ? (de ? "Amazon: nur Suchlink (keine freigegebene API)." : "Amazon: search link only (no approved API).") : (de ? "Amazon: angezeigte API-Angebote, Preise können sich ändern." : "Amazon: API-returned offers; prices may change.")} ${de ? "Bitte Variante und Zustand prüfen." : "Verify model, variant and condition."}</p><ul>${historyHtml}</ul>${duplicatesHtml ? `<p>${de ? "Mögliche Duplikate" : "Possible duplicates"}</p><ul>${duplicatesHtml}</ul>` : ""}`;
+  } catch {
+    content.textContent = de ? "Preisvergleich nicht verfügbar. Erneut öffnen zum Wiederholen." : "Price comparison unavailable. Reopen to retry.";
+    delete panel.dataset.loaded;
+  }
+}, true);
+
 function reviewListingMarkup(listing) {
   const watchlistBadges = listing.watchlists?.length
     ? listing.watchlists.map((watchlist) => `<span class="pill watchlist-pill">${escapeHtml(watchlist.name)}</span>`).join("")
@@ -2285,6 +2363,7 @@ function reviewListingMarkup(listing) {
         <h3>${escapeHtml(listing.title)}</h3>
         ${listing.description_snippet ? `<p class="review-description">${escapeHtml(listing.description_snippet)}</p>` : ""}
         <strong class="review-price">${escapeHtml(listing.price_text || t("listing.noPrice"))}</strong>
+        ${priceToolsMarkup(listing)}
         <div class="listing-facts">
           ${factsMarkup(detailFacts, listing)}
         </div>
@@ -2313,17 +2392,37 @@ function bindReviewGestures(card) {
   card.addEventListener("dblclick", reviewWatchCurrent);
   card.addEventListener("pointerdown", (event) => {
     state.reviewPointer = { x: event.clientX, y: event.clientY, id: event.pointerId };
+    card.classList.add("dragging");
+    card.style.setProperty("--drag-x", "0px");
+    card.style.setProperty("--drag-rotate", "0deg");
     card.setPointerCapture?.(event.pointerId);
+  });
+  card.addEventListener("pointermove", (event) => {
+    const start = state.reviewPointer;
+    if (!start || start.id !== event.pointerId) return;
+    const dx = event.clientX - start.x;
+    const clamped = Math.max(-130, Math.min(130, dx));
+    card.style.setProperty("--drag-x", `${clamped}px`);
+    card.style.setProperty("--drag-rotate", `${clamped / 24}deg`);
   });
   card.addEventListener("pointerup", async (event) => {
     const start = state.reviewPointer;
     state.reviewPointer = null;
+    card.classList.remove("dragging");
+    card.style.setProperty("--drag-x", "0px");
+    card.style.setProperty("--drag-rotate", "0deg");
     if (!start || start.id !== event.pointerId) return;
     const dx = event.clientX - start.x;
     const dy = event.clientY - start.y;
     if (Math.abs(dx) > 90 && Math.abs(dx) > Math.abs(dy) * 1.4) {
       await reviewSeenCurrent();
     }
+  });
+  card.addEventListener("pointercancel", () => {
+    state.reviewPointer = null;
+    card.classList.remove("dragging");
+    card.style.setProperty("--drag-x", "0px");
+    card.style.setProperty("--drag-rotate", "0deg");
   });
 }
 
@@ -2371,7 +2470,7 @@ async function reviewContactedCurrent() {
 
 function reviewOpenCurrent() {
   const listing = currentReviewListing();
-  if (listing?.listing_url) window.open(listing.listing_url, "_blank", "noopener");
+  if (listing?.listing_url) { const url = safeExternalUrl(listing.listing_url); if (url !== "#") window.open(url, "_blank", "noopener"); }
 }
 
 function reviewInquiryCurrent() {
@@ -2623,7 +2722,7 @@ async function loadListingBrowser(containerSelector, watchlistedOnly) {
   updatePaginationControls(watchlistedOnly, total);
   if (!watchlistedOnly) updateListingsSummary(total);
   browser.innerHTML = listings.length
-    ? listings.map((listing) => listingMarkup(listing)).join("")
+    ? listings.map((listing, index) => listingMarkup(listing, index)).join("")
     : `<article class="listing-card empty-listing"><strong>${escapeHtml(t(watchlistedOnly ? "empty.noWatchlist" : "empty.noListings"))}</strong><p class="meta">${escapeHtml(t(watchlistedOnly ? "empty.noWatchlistHint" : "empty.noListingsHint"))}</p></article>`;
   browser.querySelectorAll("[data-listing-action]").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -2837,7 +2936,7 @@ function listingDateFact(listing) {
   return "";
 }
 
-function listingMarkup(listing) {
+function listingMarkup(listing, index = 0) {
   const watchlistAction = listing.watchlisted ? "remove" : "add";
   const watchlistLabel = listing.watchlisted ? t("listing.removeWatchlist") : t("listing.addWatchlist");
   const watchlistBadges = listing.watchlists?.length
@@ -2850,7 +2949,7 @@ function listingMarkup(listing) {
     t("listing.score", { score: listing.score }),
   ].filter(Boolean);
   return `
-    <article class="listing-card ${listing.watchlisted ? "watchlisted" : ""}">
+    <article class="listing-card ${listing.watchlisted ? "watchlisted" : ""}" style="--card-index: ${index % 12}">
       <div class="listing-media">
         ${listing.thumbnail_url ? `
           <img class="listing-image" src="/api/listings/${listing.id}/image" alt="${escapeAttribute(listing.title)}" loading="lazy">
@@ -2858,7 +2957,7 @@ function listingMarkup(listing) {
       </div>
       <div class="listing-main">
         <div class="listing-title-row">
-          <a href="${escapeAttribute(listing.listing_url)}" target="_blank" rel="noopener">${escapeHtml(listing.title)}</a>
+          <a href="${escapeAttribute(safeExternalUrl(listing.listing_url))}" target="_blank" rel="noopener">${escapeHtml(listing.title)}</a>
           <div class="listing-badges">
             ${watchlistBadges}
             <span class="pill ${escapeAttribute(listing.status)}">${escapeHtml(statusLabel(listing.status))}</span>
@@ -2867,6 +2966,7 @@ function listingMarkup(listing) {
           </div>
         </div>
         <strong class="listing-price">${escapeHtml(listing.price_text || t("listing.noPrice"))}</strong>
+        ${priceToolsMarkup(listing)}
         <p class="meta listing-description">${escapeHtml(listing.description_snippet || "")}</p>
         <div class="listing-facts">
           ${factsMarkup(detailFacts, listing)}
@@ -3416,6 +3516,14 @@ function escapeHtml(value) {
     '"': "&quot;",
     "'": "&#039;",
   }[char]));
+}
+
+function safeExternalUrl(value) {
+  try {
+    const url = new URL(value);
+    if (["https:", "http:"].includes(url.protocol) && !url.username && !url.password) return url.href;
+  } catch {}
+  return "#";
 }
 
 function escapeAttribute(value) {
